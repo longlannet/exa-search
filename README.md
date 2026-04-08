@@ -1,37 +1,37 @@
 # exa-search
 
-Semantic web search and page-text fetching through Exa MCP via `mcporter`.
+面向 OpenClaw 的 Exa 语义搜索 skill，通过 `mcporter` 调用 Exa MCP。
 
-## What it does
+## 它能做什么
 
-- search the web with natural-language intent
-- find relevant pages across docs, blogs, GitHub, and communities
-- fetch readable page text from selected URLs
-- work as a semantic-search layer before deeper reading
+- 用自然语言做全网语义搜索
+- 在文档、博客、GitHub、社区内容里找高相关页面
+- 抓取指定 URL 的可读正文
+- 作为深度阅读前的语义检索层
 
-## Install
+## 安装
 
 ```bash
 bash scripts/install.sh
 ```
 
-## Validate
+## 校验
 
 ```bash
 bash scripts/check.sh
 ```
 
-## Quick commands
+## 常用命令
 
 ```bash
 cd exa-search
 mcporter list exa --schema
-mcporter call exa.web_search_exa query:"OpenClaw beginner guide" numResults:5
+mcporter call exa.web_search_exa query:"OpenClaw 入门指南" numResults:5
 mcporter call exa.web_fetch_exa 'urls:["https://openclaw.ai/"]' maxCharacters:4000
 ```
 
-## Notes
+## 说明
 
-- Run `mcporter` from the skill root so the local config is used.
-- Use natural-language queries, not only short keywords.
-- For a specific URL with simple readable text needs, `web_fetch` may be enough.
+- 请在 skill 根目录执行 `mcporter`，确保本地配置生效。
+- 建议直接用自然语言提问，而不只是堆很短的关键词。
+- 如果只是读取某个固定 URL 的简单正文，`web_fetch` 有时已经够用。
