@@ -1,6 +1,25 @@
 ---
 name: exa-search
 description: Exa semantic web search and page-text fetching through Exa MCP via mcporter. Use when the user wants semantic web search, relevant pages across the web, or clean page content from selected URLs.
+homepage: https://github.com/longlannet/exa-search
+metadata:
+  {
+    "openclaw":
+      {
+        "emoji": "🔎",
+        "requires": { "bins": ["mcporter"] },
+        "install":
+          [
+            {
+              "id": "node-mcporter",
+              "kind": "node",
+              "package": "mcporter",
+              "bins": ["mcporter"],
+              "label": "Install mcporter (node)",
+            },
+          ],
+      },
+  }
 ---
 
 # Exa Search
