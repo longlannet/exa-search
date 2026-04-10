@@ -7,7 +7,6 @@ metadata:
     "openclaw":
       {
         "emoji": "🔎",
-        "requires": { "bins": ["mcporter"] },
         "install":
           [
             {
