@@ -15,11 +15,25 @@
 bash scripts/install.sh
 ```
 
+安装脚本现在会额外检查：
+
+- 当前 shell 能否找到 `mcporter`
+- `bash -lc` 这种 login shell 能否找到 `mcporter`
+
+如果 login shell 找不到，安装脚本会自动把 PATH 补到：
+
+- `~/.bashrc`
+- `~/.profile`
+
+然后再次验证。
+
 ## 校验
 
 ```bash
 bash scripts/check.sh
 ```
+
+`check.sh` 现在也会验证 login shell 是否能解析 `mcporter`。
 
 ## 常用命令
 

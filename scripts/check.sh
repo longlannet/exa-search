@@ -51,6 +51,10 @@ log "mcporter: OK ($MCPORTER_BIN)"
 log "shared mcporter prefix: $GLOBAL_NPM_PREFIX"
 log "local mcporter config: $CONFIG_FILE"
 
+log "checking login shell mcporter visibility"
+bash -lc 'command -v mcporter >/dev/null 2>&1' || fail "login shell cannot find mcporter; run install.sh again"
+log "login shell visibility: OK"
+
 log "checking schema visibility"
 (
   cd "$BASE_DIR"

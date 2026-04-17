@@ -8,6 +8,9 @@ GLOBAL_NPM_PREFIX="${GLOBAL_NPM_PREFIX:-/root/.openclaw/workspace/.npm-global}"
 GLOBAL_MCPORTER_BIN="$GLOBAL_NPM_PREFIX/bin/mcporter"
 PATH_SHIM_DIR="${PATH_SHIM_DIR:-$HOME/.local/bin}"
 PATH_SHIM_BIN="$PATH_SHIM_DIR/mcporter"
+LOGIN_PATH_LINES=(
+  'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/root/.openclaw/workspace/.npm-global/bin:$PATH"'
+)
 export PATH="$GLOBAL_NPM_PREFIX/bin:$PATH"
 EXA_URL="https://mcp.exa.ai/mcp"
 
@@ -67,6 +70,35 @@ ensure_command_visible() {
   log "mcporter shim skipped: existing non-symlink at $PATH_SHIM_BIN"
 }
 
+ensure_login_shell_path() {
+  local file line
+  for file in "$HOME/.bashrc" "$HOME/.profile"; do
+    touch "$file"
+    for line in "${LOGIN_PATH_LINES[@]}"; do
+      if ! grep -Fqx "$line" "$file"; then
+        printf '\n%s\n' "$line" >> "$file"
+        log "added PATH line to $file"
+      else
+        log "PATH line already present in $file"
+      fi
+    done
+  done
+}
+
+verify_login_shell_visibility() {
+  if bash -lc 'command -v mcporter >/dev/null 2>&1'; then
+    log "login shell mcporter visibility: OK"
+    return 0
+  fi
+  log "login shell mcporter visibility: missing; patching shell startup files"
+  ensure_login_shell_path
+  if bash -lc 'command -v mcporter >/dev/null 2>&1'; then
+    log "login shell mcporter visibility after patch: OK"
+    return 0
+  fi
+  fail "mcporter still not visible in login shell after PATH patch"
+}
+
 smoke_test() {
   log "running smoke test: exa.web_search_exa query:'OpenClaw beginner guide' numResults:1"
   (
@@ -85,6 +117,7 @@ fi
 log "mcporter bin: $MCPORTER_BIN"
 log "shared mcporter prefix: $GLOBAL_NPM_PREFIX"
 ensure_command_visible
+verify_login_shell_visibility
 
 log "writing local mcporter config"
 write_local_config

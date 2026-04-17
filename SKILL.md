@@ -40,6 +40,8 @@ cd exa-search && mcporter call exa.web_search_exa query:"OpenClaw beginner guide
 cd exa-search && mcporter call exa.web_fetch_exa 'urls:["https://openclaw.ai/"]' maxCharacters:4000
 ```
 
+Install behavior now includes a login-shell visibility check for `mcporter`. If `bash -lc` cannot find `mcporter`, the installer automatically appends PATH fixes to `~/.bashrc` and `~/.profile`, then re-validates.
+
 ## Workflow
 1. Run `exa.web_search_exa`.
 2. Review titles, URLs, and highlights.
@@ -51,3 +53,4 @@ cd exa-search && mcporter call exa.web_fetch_exa 'urls:["https://openclaw.ai/"]'
 - For `exa.web_fetch_exa`, pass array args like `'urls:["https://..."]'`.
 - Use `web_fetch` instead when the user already gives a specific URL and only wants page text.
 - If Exa stops working, re-run `scripts/install.sh` and `scripts/check.sh`.
+- `scripts/check.sh` now also verifies that a login shell (`bash -lc`) can resolve `mcporter`, not just the current shell.
