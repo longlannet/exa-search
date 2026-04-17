@@ -8,8 +8,33 @@ GLOBAL_NPM_PREFIX="${GLOBAL_NPM_PREFIX:-/root/.openclaw/workspace/.npm-global}"
 GLOBAL_MCPORTER_BIN="$GLOBAL_NPM_PREFIX/bin/mcporter"
 PATH_SHIM_DIR="${PATH_SHIM_DIR:-$HOME/.local/bin}"
 PATH_SHIM_BIN="$PATH_SHIM_DIR/mcporter"
-LOGIN_PATH_LINES=(
+LEGACY_LOGIN_PATH_LINES=(
   'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/root/.openclaw/workspace/.npm-global/bin:$PATH"'
+)
+PATH_BLOCK_HEADER='# exa-search mcporter PATH'
+LOGIN_PATH_LINES=(
+  'path_prepend_once() {'
+  '  case ":$PATH:" in'
+  '    *":$1:"*) ;;'
+  '    *) PATH="$1:$PATH" ;;'
+  '  esac'
+  '}'
+  'path_dedupe() {'
+  '  local old_path="$PATH" new_path="" dir IFS=":"'
+  '  for dir in $old_path; do'
+  '    [ -n "$dir" ] || continue'
+  '    case ":$new_path:" in'
+  '      *":$dir:"*) ;;'
+  '      *) new_path="${new_path:+$new_path:}$dir" ;;'
+  '    esac'
+  '  done'
+  '  PATH="$new_path"'
+  '}'
+  'path_prepend_once "/root/.openclaw/workspace/.npm-global/bin"'
+  'path_prepend_once "$HOME/.npm-global/bin"'
+  'path_prepend_once "$HOME/.local/bin"'
+  'path_dedupe'
+  'export PATH'
 )
 export PATH="$GLOBAL_NPM_PREFIX/bin:$PATH"
 EXA_URL="https://mcp.exa.ai/mcp"
@@ -70,33 +95,60 @@ ensure_command_visible() {
   log "mcporter shim skipped: existing non-symlink at $PATH_SHIM_BIN"
 }
 
-ensure_login_shell_path() {
-  local file line
+normalize_login_shell_path() {
+  local file legacy_line
   for file in "$HOME/.bashrc" "$HOME/.profile"; do
     touch "$file"
-    for line in "${LOGIN_PATH_LINES[@]}"; do
-      if ! grep -Fqx "$line" "$file"; then
-        printf '\n%s\n' "$line" >> "$file"
-        log "added PATH line to $file"
-      else
-        log "PATH line already present in $file"
-      fi
+    for legacy_line in "${LEGACY_LOGIN_PATH_LINES[@]}"; do
+      python3 - <<'PY' "$file" "$legacy_line" "$PATH_BLOCK_HEADER"
+import sys
+path, legacy, header = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, 'r', encoding='utf-8') as f:
+    lines = f.read().splitlines()
+out = []
+i = 0
+changed = False
+while i < len(lines):
+    line = lines[i]
+    if line == legacy:
+        changed = True
+        i += 1
+        continue
+    if line == header:
+        changed = True
+        i += 1
+        while i < len(lines) and lines[i] != 'export PATH':
+            i += 1
+        if i < len(lines) and lines[i] == 'export PATH':
+            i += 1
+        continue
+    out.append(line)
+    i += 1
+with open(path, 'w', encoding='utf-8') as f:
+    for line in out:
+        f.write(line + '\n')
+print('changed' if changed else 'unchanged')
+PY
     done
   done
+  if ! grep -Fqx "$PATH_BLOCK_HEADER" "$HOME/.bashrc"; then
+    printf '\n%s\n' "$PATH_BLOCK_HEADER" >> "$HOME/.bashrc"
+    for line in "${LOGIN_PATH_LINES[@]}"; do
+      printf '%s\n' "$line" >> "$HOME/.bashrc"
+    done
+    log "added deduplicating PATH block to $HOME/.bashrc"
+  else
+    log "deduplicating PATH block already present in $HOME/.bashrc"
+  fi
 }
 
 verify_login_shell_visibility() {
+  normalize_login_shell_path
   if bash -lc 'command -v mcporter >/dev/null 2>&1'; then
     log "login shell mcporter visibility: OK"
     return 0
   fi
-  log "login shell mcporter visibility: missing; patching shell startup files"
-  ensure_login_shell_path
-  if bash -lc 'command -v mcporter >/dev/null 2>&1'; then
-    log "login shell mcporter visibility after patch: OK"
-    return 0
-  fi
-  fail "mcporter still not visible in login shell after PATH patch"
+  fail "mcporter still not visible in login shell after PATH normalization"
 }
 
 smoke_test() {
