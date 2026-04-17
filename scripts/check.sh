@@ -5,6 +5,7 @@ BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_FILE="$BASE_DIR/config/mcporter.json"
 GLOBAL_NPM_PREFIX="${GLOBAL_NPM_PREFIX:-/root/.openclaw/workspace/.npm-global}"
 GLOBAL_MCPORTER_BIN="$GLOBAL_NPM_PREFIX/bin/mcporter"
+export PATH="$GLOBAL_NPM_PREFIX/bin:$PATH"
 RUN_SMOKE="${RUN_SMOKE:-1}"
 
 log() { printf '[exa-search] %s\n' "$*"; }
