@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "exa": {
-      "url": "https://mcp.exa.ai/mcp"
+      "baseUrl": "https://mcp.exa.ai/mcp"
     }
   }
 }

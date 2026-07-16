@@ -1,51 +1,60 @@
 # exa-search
 
-面向 OpenClaw 的 Exa 语义搜索 skill，通过 `mcporter` 调用 Exa MCP。
+面向 OpenClaw 的 Exa 语义搜索 Skill，通过项目本地配置调用 Exa MCP。
 
-## 它能做什么
+## 功能
 
-- 用自然语言做全网语义搜索
-- 在文档、博客、GitHub、社区内容里找高相关页面
+- 用自然语言进行语义搜索
+- 查找文档、博客、GitHub 和社区中的高相关页面
 - 抓取指定 URL 的可读正文
-- 作为深度阅读前的语义检索层
+- 为深度研究提供候选来源
 
-## 安装
+## 安装与配置
+
+OpenClaw 会根据 `SKILL.md` 安装固定版本 `mcporter@0.9.0`，以兼容受支持的 Node 22 和 Node 24 环境。随后在仓库根目录执行：
 
 ```bash
 bash scripts/install.sh
 ```
 
-安装脚本现在会额外检查：
+安装脚本只维护 `config/mcporter.json`：
 
-- 当前 shell 能否找到 `mcporter`
-- `bash -lc` 这种 login shell 能否找到 `mcporter`
+- 保留其他 MCP 服务、现有 Exa 地址、请求头和 API Key
+- 使用私有临时文件和原子替换，最终权限为 `0600`
+- 不安装 npm 包
+- 不修改 `.bashrc`、`.profile` 或 PATH
+- 默认不发起真实搜索，不消耗搜索配额
 
-如果 login shell 找不到，安装脚本会自动把 PATH 补到：
+需要同时验证真实搜索时显式运行：
 
-- `~/.bashrc`
-- `~/.profile`
-
-然后再次验证。
+```bash
+RUN_SMOKE=1 bash scripts/install.sh
+```
 
 ## 校验
 
 ```bash
 bash scripts/check.sh
+RUN_SMOKE=1 bash scripts/check.sh
+bash scripts/selftest.sh
 ```
 
-`check.sh` 现在也会验证 login shell 是否能解析 `mcporter`。
+`check.sh` 会分别捕获 stdout 和 stderr，拒绝 MCP 错误、空响应和超大输出。默认输出上限为 4 MiB，可通过 `MAX_OUTPUT_BYTES` 调整。
 
 ## 常用命令
 
 ```bash
-cd exa-search
-mcporter list exa --schema
-mcporter call exa.web_search_exa query:"OpenClaw 入门指南" numResults:5
-mcporter call exa.web_fetch_exa 'urls:["https://openclaw.ai/"]' maxCharacters:4000
+mcporter --config "$(pwd)/config/mcporter.json" list exa --schema --timeout 15000
+mcporter --config "$(pwd)/config/mcporter.json" call exa.web_search_exa \
+  --args '{"query":"OpenClaw 入门指南","numResults":5}' \
+  --timeout 30000 --output json
+mcporter --config "$(pwd)/config/mcporter.json" call exa.web_fetch_exa \
+  --args '{"urls":["https://openclaw.ai/"],"maxCharacters":4000}' \
+  --timeout 30000 --output json
 ```
 
-## 说明
+## 安全说明
 
-- 请在 skill 根目录执行 `mcporter`，确保本地配置生效。
-- 建议直接用自然语言提问，而不只是堆很短的关键词。
-- 如果只是读取某个固定 URL 的简单正文，`web_fetch` 有时已经够用。
+- 搜索结果和抓取内容都属于不可信外部数据。
+- 不要向 Exa 发送密钥、私有 URL、内网地址或机密文本。
+- HTTP 429 或服务故障时不要重复执行安装；等待额度恢复，或改用 Google 搜索与 OpenClaw 内置 `web_fetch`。
