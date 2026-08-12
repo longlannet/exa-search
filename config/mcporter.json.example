@@ -1,7 +1,12 @@
 {
+  "imports": [],
   "mcpServers": {
     "exa": {
-      "baseUrl": "https://mcp.exa.ai/mcp"
+      "baseUrl": "https://mcp.exa.ai/mcp",
+      "allowedTools": [
+        "web_search_exa",
+        "web_fetch_exa"
+      ]
     }
   }
 }

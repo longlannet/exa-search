@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install test prerequisites
+        run: |
+          shellcheck_package_version=0.9.0-1build2
+          sudo apt-get update
+          sudo apt-get install --yes "shellcheck=$shellcheck_package_version"
+          test "$(shellcheck --version | awk '/^version:/ { print $2 }')" = 0.9.0
+          npm ci --ignore-scripts
+          actionlint_archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "$actionlint_archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757 \
+            "$actionlint_archive" | sha256sum --check
+          tar -xzf "$actionlint_archive" -C "$RUNNER_TEMP" actionlint
+      - name: Static checks
+        run: |
+          empty_tree="$(git hash-object -t tree /dev/null)"
+          git diff --check "$empty_tree" HEAD
+          bash -n scripts/*.sh
+          shellcheck -x scripts/*.sh
+          for file in scripts/*.mjs; do node --check "$file"; done
+          node scripts/validate-skill.mjs SKILL.md
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/ci.yml
+      - name: Anonymous-only contract regressions
+        run: |
+          fixture="$RUNNER_TEMP/exa-search-validator"
+          mkdir -p "$fixture/.github/workflows" "$fixture/config" "$fixture/scripts"
+          cp README.md SKILL.md package.json "$fixture/"
+          cp .github/workflows/ci.yml "$fixture/.github/workflows/"
+          cp config/mcporter.json.example "$fixture/config/"
+          cp scripts/validate-skill.mjs "$fixture/scripts/"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$fixture/node_modules"
+          node - "$fixture/SKILL.md" <<'NODE'
+          const fs = require("node:fs");
+          const file = process.argv[2];
+          const text = fs.readFileSync(file, "utf8").replace(
+            '"os": ["linux"],',
+            '"os": ["linux"], "primaryEnv": "EXA_API_KEY",',
+          );
+          fs.writeFileSync(file, text);
+          NODE
+          if node "$fixture/scripts/validate-skill.mjs" "$fixture/SKILL.md"; then
+            echo "validator accepted API-key metadata" >&2
+            exit 1
+          fi
+          cp SKILL.md "$fixture/SKILL.md"
+          node - "$fixture/config/mcporter.json.example" <<'NODE'
+          const fs = require("node:fs");
+          const file = process.argv[2];
+          const value = JSON.parse(fs.readFileSync(file, "utf8"));
+          value.mcpServers.exa.headers = { Authorization: "Bearer forbidden" };
+          fs.writeFileSync(file, `${JSON.stringify(value)}\n`);
+          NODE
+          if node "$fixture/scripts/validate-skill.mjs" "$fixture/SKILL.md"; then
+            echo "validator accepted authenticated Exa config" >&2
+            exit 1
+          fi
+      - name: Clean archive adversarial selftest
+        working-directory: /tmp
+        run: |
+          archive_root="$RUNNER_TEMP/exa-search-archive"
+          mkdir -- "$archive_root"
+          git -C "$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$archive_root"
+          npm --prefix "$archive_root" ci --ignore-scripts --offline
+          node "$archive_root/scripts/validate-skill.mjs" "$archive_root/SKILL.md"
+          MCPORTER_BIN="$archive_root/node_modules/.bin/mcporter" \
+            bash "$archive_root/scripts/selftest.sh"
+      - name: Dependency and registry-signature audit
+        run: |
+          npm audit
+          npm audit signatures
+
+  live-exa-canary:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Live Exa canary (scheduled/manual)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install locked runtime
+        run: npm ci --ignore-scripts
+      - name: Configure anonymous Exa MCP without a tool call
+        env:
+          RUN_CHECK: "0"
+        run: bash scripts/install.sh
+      - name: Check live Exa tool schema
+        run: bash scripts/check.sh
+      - name: Run one live anonymous search
+        run: bash scripts/call.sh search 1 "OpenClaw official documentation" >/dev/null
+      - name: Run one live anonymous fetch
+        run: bash scripts/call.sh fetch 1000 "https://docs.openclaw.ai/" >/dev/null
