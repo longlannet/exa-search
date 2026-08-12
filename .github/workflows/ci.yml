@@ -29,11 +29,16 @@ jobs:
           cache: npm
       - name: Install test prerequisites
         run: |
-          shellcheck_package_version=0.9.0-1build2
-          sudo apt-get update
-          sudo apt-get install --yes "shellcheck=$shellcheck_package_version"
-          test "$(shellcheck --version | awk '/^version:/ { print $2 }')" = 0.9.0
           npm ci --ignore-scripts
+          shellcheck_archive="$RUNNER_TEMP/shellcheck.tar.xz"
+          curl --fail --silent --show-error --location \
+            --output "$shellcheck_archive" \
+            https://github.com/koalaman/shellcheck/releases/download/v0.9.0/shellcheck-v0.9.0.linux.x86_64.tar.xz
+          printf '%s  %s\n' \
+            700324c6dd0ebea0117591c6cc9d7350d9c7c5c287acbad7630fa17b1d4d9e2f \
+            "$shellcheck_archive" | sha256sum --check
+          tar -xJf "$shellcheck_archive" -C "$RUNNER_TEMP" shellcheck-v0.9.0/shellcheck
+          test "$("$RUNNER_TEMP/shellcheck-v0.9.0/shellcheck" --version | awk '/^version:/ { print $2 }')" = 0.9.0
           actionlint_archive="$RUNNER_TEMP/actionlint.tar.gz"
           curl --fail --silent --show-error --location \
             --output "$actionlint_archive" \
@@ -47,7 +52,7 @@ jobs:
           empty_tree="$(git hash-object -t tree /dev/null)"
           git diff --check "$empty_tree" HEAD
           bash -n scripts/*.sh
-          shellcheck -x scripts/*.sh
+          "$RUNNER_TEMP/shellcheck-v0.9.0/shellcheck" -x scripts/*.sh
           for file in scripts/*.mjs; do node --check "$file"; done
           node scripts/validate-skill.mjs SKILL.md
           "$RUNNER_TEMP/actionlint" -color .github/workflows/ci.yml
