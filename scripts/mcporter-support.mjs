@@ -11,8 +11,10 @@ const LOCKED_MCPORTER_LOCATION = "node_modules/mcporter";
 
 function fail(message) { throw new Error(message); }
 function requireSupportedNode() {
-  const major = Number(process.versions.node.split(".", 1)[0]);
-  if (major !== 22 && major !== 24) fail(`Node 22 or 24 is required; found ${process.versions.node}`);
+  const [major, minor] = process.versions.node.split(".", 2).map(Number);
+  if (!((major === 22 && minor >= 12) || major === 24)) {
+    fail(`Node 22.12 or later in the 22.x line, or Node 24, is required; found ${process.versions.node}`);
+  }
 }
 function canonicalValue(value) {
   if (Array.isArray(value)) return value.map(canonicalValue);

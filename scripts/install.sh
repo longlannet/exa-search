@@ -102,7 +102,8 @@ for attempt in 1 2 3 4 5; do
   normalize_status="$("$NODE_BIN" "$CONFIG_HELPER" normalize "$CONFIG_FILE" "$STAGED_CONFIG" "$MCPORTER_BIN")" || \
     fail "refusing unsupported existing Exa configuration"
   run_capped "staged configuration validation" "$COMMAND_TIMEOUT_MS" \
-    "$MCPORTER_BIN" --config "$STAGED_CONFIG" config doctor >/dev/null
+    "$NODE_BIN" --max-old-space-size=128 "$MCPORTER_BIN" \
+    --config "$STAGED_CONFIG" config doctor >/dev/null
 
   if [ "$RUN_CHECK" = "1" ]; then
     run_check

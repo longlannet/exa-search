@@ -91,11 +91,12 @@ log "mcporter: $MCPORTER_BIN"
 log "config: $CONFIG_FILE"
 verify_policy
 run_capped "configuration validation" "$DISCOVERY_TIMEOUT_MS" \
-  "$MCPORTER_BIN" --config "$CONFIG_FILE" config doctor >/dev/null
+  "$NODE_BIN" --max-old-space-size=128 "$MCPORTER_BIN" \
+  --config "$CONFIG_FILE" config doctor >/dev/null
 verify_policy
 log "checking Exa schema"
 run_capped "schema discovery" "$DISCOVERY_TIMEOUT_MS" \
-  "$NODE_BIN" "$SCHEMA_HELPER" "$MCPORTER_BIN" "$CONFIG_FILE" \
+  "$NODE_BIN" --max-old-space-size=128 "$SCHEMA_HELPER" "$MCPORTER_BIN" "$CONFIG_FILE" \
   >"$SCHEMA_OUTPUT"
 verify_policy
 "$NODE_BIN" "$SCHEMA_CHECKER" "$SCHEMA_OUTPUT" || fail "schema response validation failed"
@@ -104,7 +105,8 @@ log "schema check: OK"
 if [ "$RUN_SMOKE" = "1" ]; then
   log "running one live Exa search"
   run_capped "live search" "$CALL_TIMEOUT_MS" \
-    "$NODE_BIN" "$CALL_HELPER" call "$MCPORTER_BIN" "$CONFIG_FILE" "$CALL_TIMEOUT_MS" \
+    "$NODE_BIN" --max-old-space-size=128 "$CALL_HELPER" call \
+    "$MCPORTER_BIN" "$CONFIG_FILE" "$CALL_TIMEOUT_MS" \
     search 1 "OpenClaw beginner guide" >/dev/null
   verify_policy
   log "live search: OK"

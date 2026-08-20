@@ -24,10 +24,10 @@ function schema(overrides = {}) {
     status: "ok",
     tools: [
       { name: "web_search_exa", inputSchema: { $schema: "http://json-schema.org/draft-07/schema#",
-        type: "object", properties: {
+        type: "object", additionalProperties: false, properties: {
         query: { type: "string", minLength: 1 }, numResults: { type: "number", minimum: 1, maximum: 10 },
       }, required: ["query"] } },
-      { name: "web_fetch_exa", inputSchema: { type: "object", properties: {
+      { name: "web_fetch_exa", inputSchema: { type: "object", additionalProperties: false, properties: {
         urls: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },
         maxCharacters: { type: "number", minimum: 1, maximum: 100000 },
       }, required: ["urls"] } },
@@ -64,13 +64,29 @@ try {
   const fixture = path.join(temporary, "schema.json");
   fs.writeFileSync(fixture, JSON.stringify(schema()));
   expectStatus(run(schemaChecker, [fixture]), 0, "compatible schema");
+  for (const additionalProperties of [true, {}]) {
+    fs.writeFileSync(fixture, JSON.stringify(schema({ apply(value) {
+      value.tools[0].inputSchema.additionalProperties = additionalProperties;
+      value.tools[0].inputSchema.minProperties = 2;
+      value.tools[0].inputSchema.maxProperties = 2;
+    } })));
+    expectStatus(run(schemaChecker, [fixture]), 0, "compatible object constraints");
+  }
   for (const apply of [
     (value) => value.tools[0].inputSchema.required.push("extra"),
     (value) => { value.tools[0].inputSchema.allOf = [{ required: ["query"] }]; },
     (value) => { value.tools[0].inputSchema.$recursiveRef = "https://example.invalid/false-schema"; },
     (value) => { value.tools[0].inputSchema.dependentRequired = { query: ["extra"] }; },
     (value) => { value.tools[0].inputSchema.patternProperties = { ".*": { const: null } }; },
+    (value) => { value.tools[0].inputSchema.additionalProperties = null; },
+    (value) => { value.tools[0].inputSchema.additionalProperties = []; },
+    (value) => { value.tools[0].inputSchema.additionalProperties = 0; },
+    (value) => { value.tools[0].inputSchema.additionalProperties = "false"; },
+    (value) => { value.tools[0].inputSchema.minProperties = -1; },
+    (value) => { value.tools[0].inputSchema.minProperties = 0.5; },
     (value) => { value.tools[0].inputSchema.minProperties = 3; },
+    (value) => { value.tools[0].inputSchema.maxProperties = -1; },
+    (value) => { value.tools[0].inputSchema.maxProperties = 2.5; },
     (value) => { value.tools[0].inputSchema.maxProperties = 1; },
     (value) => { value.tools[0].inputSchema.properties.numResults.maximum = 1; },
     (value) => { value.tools[0].inputSchema.properties.numResults.enum = [1]; },
@@ -84,6 +100,10 @@ try {
       value.tools[0].inputSchema.properties.numResults.then = false;
     },
     (value) => { value.tools[1].inputSchema.properties.urls.maxItems = 2; },
+    (value) => { value.tools[1].inputSchema.properties.urls.minItems = -1; },
+    (value) => { value.tools[1].inputSchema.properties.urls.minItems = 0.5; },
+    (value) => { value.tools[1].inputSchema.properties.urls.maxItems = -1; },
+    (value) => { value.tools[1].inputSchema.properties.urls.maxItems = 3.5; },
     (value) => { value.tools[1].inputSchema.properties.urls.uniqueItems = true; },
     (value) => { value.tools[1].inputSchema.properties.urls.$ref = "https://example.invalid/false-schema"; },
     (value) => {

@@ -11,7 +11,7 @@
 
 ## 环境与安装
 
-要求 Linux、Node 22/24、npm 和 GNU coreutils。OpenClaw 显示 `Ready` 只表示这些主机前置条件存在，不表示 Skill 本地的锁定依赖已经安装。脚本不仅校验 `mcporter@0.9.0` 的版本、包结构和清单声明的 CLI，还会逐个校验其实际运行时依赖是否与仓库 `package-lock.json` 中的解析路径和版本完全一致；同名脚本、其他版本或漂移闭包都会被拒绝。
+要求 Linux、Node 22.12 及以上的 22.x 或 Node 24.x、npm 和 GNU coreutils。OpenClaw 显示 `Ready` 只表示这些主机命令存在，不表示 Node 已满足最低版本，也不表示 Skill 本地的锁定依赖已经安装。脚本不仅校验 `mcporter@0.9.0` 的版本、包结构和清单声明的 CLI，还会逐个校验其实际运行时依赖是否与仓库 `package-lock.json` 中的解析路径和版本完全一致；同名脚本、其他版本或漂移闭包都会被拒绝。
 
 先在 Skill 根目录建立可复现的本地运行时，再安装配置：
 
@@ -63,6 +63,8 @@ CI 和本地入口都通过仓库内的 `package-lock.json` 固定完整 mcporte
 所有外部 MCP 操作都经过 GNU `timeout` 硬截止，并把 stdout/stderr 捕获到权限为私有的临时文件。两路输出的内核级总上限不高于 `MAX_OUTPUT_BYTES`，默认 4 MiB；达到潜在截断边界会失败关闭。`SHOW_ERROR_OUTPUT=1` 只用于本地诊断，最多显示经过控制字符转义的 8 KiB stderr 尾部，其中仍可能含敏感或不可信文本。
 
 push 和 pull request 的 CI 不调用 Exa 工具，只运行静态检查、隔离回归测试以及 npm 依赖和 registry 签名审计。另一个仅由定时或手动触发的真实 canary 会检查 Exa 官方 schema、一次匿名搜索和一次匿名抓取；远端服务或配额波动只影响 canary，不会成为 pull request 门禁。
+
+`v0.4.1` 是一个已发布但未签名的历史 tag，不应将它表述为已经加密验证。不改写旧 tag 的修复路径是从 `v0.4.2` 开始使用已签名 annotated tag、确定性源码归档和 GitHub immutable release。完整门禁和独立验证步骤见 [`RELEASING.md`](RELEASING.md)。
 
 ## 安全边界
 

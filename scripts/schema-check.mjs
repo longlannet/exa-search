@@ -2,6 +2,9 @@
 import fs from "node:fs";
 
 function fail(message) { throw new Error(message); }
+function isSchemaValue(value) {
+  return typeof value === "boolean" || Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
 const ANNOTATION_KEYWORDS = Object.freeze([
   "$comment", "title", "description", "default", "examples", "deprecated", "readOnly", "writeOnly",
 ]);
@@ -40,12 +43,17 @@ function requireCompatibleObject(schema, name, propertyCount) {
   if (schema.$schema !== undefined && schema.$schema !== SUPPORTED_SCHEMA_DIALECT) {
     fail(`${name} uses an unsupported JSON Schema dialect`);
   }
+  if (schema.additionalProperties !== undefined && !isSchemaValue(schema.additionalProperties)) {
+    fail(`${name} additionalProperties must be a boolean or schema object`);
+  }
   if (schema.minProperties !== undefined &&
-      (!Number.isSafeInteger(schema.minProperties) || schema.minProperties > propertyCount)) {
+      (!Number.isSafeInteger(schema.minProperties) || schema.minProperties < 0 ||
+       schema.minProperties > propertyCount)) {
     fail(`${name} minProperties is incompatible with the wrapper`);
   }
   if (schema.maxProperties !== undefined &&
-      (!Number.isSafeInteger(schema.maxProperties) || schema.maxProperties < propertyCount)) {
+      (!Number.isSafeInteger(schema.maxProperties) || schema.maxProperties < 0 ||
+       schema.maxProperties < propertyCount)) {
     fail(`${name} maxProperties is incompatible with the wrapper`);
   }
 }
@@ -112,10 +120,12 @@ try {
   const urls = fetch.properties.urls;
   requireOnlyKeywords(urls, "urls", ["type", "items", "minItems", "maxItems"]);
   requireOnlyKeywords(urls.items, "urls items", ["type"]);
-  if (urls.minItems !== undefined && (!Number.isFinite(urls.minItems) || urls.minItems > 1)) {
+  if (urls.minItems !== undefined &&
+      (!Number.isSafeInteger(urls.minItems) || urls.minItems < 0 || urls.minItems > 1)) {
     fail("urls minItems is incompatible with the wrapper");
   }
-  if (urls.maxItems !== undefined && (!Number.isFinite(urls.maxItems) || urls.maxItems < 3)) {
+  if (urls.maxItems !== undefined &&
+      (!Number.isSafeInteger(urls.maxItems) || urls.maxItems < 0 || urls.maxItems < 3)) {
     fail("urls maxItems is incompatible with the wrapper");
   }
   requireCompatibleRange(fetch.properties.maxCharacters, "maxCharacters", 1, 100000);

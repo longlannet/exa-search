@@ -138,7 +138,9 @@ const configIndex = argv.indexOf("--config");
 if (configIndex < 0 || !argv[configIndex + 1]) process.exit(2);
 const configPath = argv[configIndex + 1];
 const args = argv.filter((_, index) => index !== configIndex && index !== configIndex + 1);
-if (process.env.CLI_LOG) fs.appendFileSync(process.env.CLI_LOG, `${JSON.stringify({ configPath, args })}\n`);
+if (process.env.CLI_LOG) {
+  fs.appendFileSync(process.env.CLI_LOG, `${JSON.stringify({ configPath, args, execArgv: process.execArgv })}\n`);
+}
 function config() {
   const errors = [];
   const value = jsonc.parse(fs.readFileSync(configPath, "utf8"), errors, { allowTrailingComma: true });
@@ -174,10 +176,10 @@ function readConfig(configPath) {
 function schema(mode) {
   const tools = [
     { name: "web_search_exa", inputSchema: { $schema: "http://json-schema.org/draft-07/schema#",
-      type: "object", properties: {
+      type: "object", additionalProperties: false, properties: {
       query: { type: "string", minLength: 1 }, numResults: { type: "number", minimum: 1, maximum: 10 },
     }, required: ["query"] } },
-    { name: "web_fetch_exa", inputSchema: { type: "object", properties: {
+    { name: "web_fetch_exa", inputSchema: { type: "object", additionalProperties: false, properties: {
       urls: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },
       maxCharacters: { type: "number", minimum: 1, maximum: 100000 },
     }, required: ["urls"] } },
@@ -197,6 +199,11 @@ function schema(mode) {
   if (mode === "root-const") tools[0].inputSchema.const = {};
   if (mode === "dependent-required") tools[0].inputSchema.dependentRequired = { query: ["extra"] };
   if (mode === "pattern-properties") tools[0].inputSchema.patternProperties = { ".*": false };
+  if (mode === "invalid-additional-null") tools[0].inputSchema.additionalProperties = null;
+  if (mode === "invalid-additional-array") tools[0].inputSchema.additionalProperties = [];
+  if (mode === "invalid-additional-number") tools[0].inputSchema.additionalProperties = 0;
+  if (mode === "invalid-additional-string") tools[0].inputSchema.additionalProperties = "false";
+  if (mode === "negative-min-properties") tools[0].inputSchema.minProperties = -1;
   if (mode === "min-properties") tools[0].inputSchema.minProperties = 3;
   if (mode === "max-properties") tools[0].inputSchema.maxProperties = 1;
   if (mode === "query-ref") tools[0].inputSchema.properties.query.$ref = "https://example.invalid/false-schema";
@@ -205,6 +212,9 @@ function schema(mode) {
     tools[0].inputSchema.properties.numResults.then = false;
   }
   if (mode === "narrow-urls") tools[1].inputSchema.properties.urls.maxItems = 2;
+  if (mode === "negative-min-items") tools[1].inputSchema.properties.urls.minItems = -1;
+  if (mode === "fractional-min-items") tools[1].inputSchema.properties.urls.minItems = 0.5;
+  if (mode === "fractional-max-items") tools[1].inputSchema.properties.urls.maxItems = 3.5;
   if (mode === "unique-urls") tools[1].inputSchema.properties.urls.uniqueItems = true;
   if (mode === "urls-ref") tools[1].inputSchema.properties.urls.$ref = "https://example.invalid/false-schema";
   if (mode === "url-items-conditional") {
@@ -215,7 +225,7 @@ function schema(mode) {
   if (mode === "characters-ref") {
     tools[1].inputSchema.properties.maxCharacters.$dynamicRef = "https://example.invalid/false-schema";
   }
-  if (mode === "oversize") tools[0].description = "x".repeat(65536);
+  if (mode === "oversize") tools[0].inputSchema.title = "x".repeat(65536);
   return tools;
 }
 async function hang(mode) {
@@ -238,10 +248,69 @@ export async function createRuntime(options) {
       return {
         definition: { command: { headers: { accept: "application/json, text/event-stream" } } },
         client: {
-          async listTools() {
+          async listTools(params) {
             const mode = process.env.SCHEMA_MODE ?? "valid";
             if (process.env.OVERSIZE_STDERR === "1") process.stderr.write("e".repeat(65536));
             if (mode === "hang" || mode === "stubborn") await hang(mode);
+            if (mode === "paged") {
+              if (params && Object.prototype.hasOwnProperty.call(params, "cursor")) {
+                if (params.cursor !== "") throw new Error("unexpected pagination cursor");
+                return { tools: [schema(mode)[1]] };
+              }
+              return { tools: [schema(mode)[0]], nextCursor: "" };
+            }
+            if (mode === "paged-extra") {
+              if (params?.cursor === "extra") {
+                return { tools: [{ name: "unexpected_tool", inputSchema: { type: "object", properties: {} } }] };
+              }
+              return { tools: schema(mode), nextCursor: "extra" };
+            }
+            if (mode === "repeated-cursor") return { tools: [], nextCursor: "repeat" };
+            if (mode === "cursor-cycle") {
+              if (params?.cursor === "A") return { tools: [], nextCursor: "B" };
+              if (params?.cursor === "B") return { tools: [], nextCursor: "A" };
+              return { tools: [], nextCursor: "A" };
+            }
+            if (mode === "invalid-cursor") return { tools: [], nextCursor: 1 };
+            if (mode === "oversized-cursor") return { tools: [], nextCursor: "x".repeat(4097) };
+            if (mode === "tool-limit") {
+              return { tools: Array.from({ length: 65 }, (_, index) => ({
+                name: `tool_${index}`,
+                inputSchema: { type: "object", properties: {} },
+              })) };
+            }
+            if (mode === "page-limit") {
+              const page = params === undefined ? 0 : Number(params.cursor);
+              return { tools: [], nextCursor: String(page + 1) };
+            }
+            if (mode === "exact-page-limit") {
+              const page = params === undefined ? 0 : Number(params.cursor);
+              return page === 31 ? { tools: schema(mode) } :
+                { tools: [], nextCursor: String(page + 1) };
+            }
+            if (mode === "exact-tool-limit") {
+              return { tools: Array.from({ length: 64 }, (_, index) => ({
+                name: `tool_${index}`,
+                inputSchema: { type: "object", properties: {} },
+              })) };
+            }
+            if (mode === "cross-page-tool-limit") {
+              if (params?.cursor === "overflow") {
+                return { tools: [{ name: "tool_64", inputSchema: { type: "object", properties: {} } }] };
+              }
+              return {
+                tools: Array.from({ length: 64 }, (_, index) => ({
+                  name: `tool_${index}`,
+                  inputSchema: { type: "object", properties: {} },
+                })),
+                nextCursor: "overflow",
+              };
+            }
+            if (mode === "schema-byte-limit") {
+              const value = schema(mode);
+              value[0].inputSchema.title = "x".repeat(2 * 1024 * 1024);
+              return { tools: value };
+            }
             return { tools: schema(mode) };
           },
           async callTool(request) {
@@ -323,7 +392,9 @@ node - "$TMP_ROOT/cli.log" "$TMP_ROOT/config/preserve.jsonc" <<'NODE'
 const fs = require("fs");
 const [logPath, livePath] = process.argv.slice(2);
 for (const line of fs.readFileSync(logPath, "utf8").trim().split("\n")) {
-  if (JSON.parse(line).configPath === livePath) process.exit(1);
+  const entry = JSON.parse(line);
+  if (entry.configPath === livePath ||
+      JSON.stringify(entry.execArgv) !== JSON.stringify(["--max-old-space-size=128"])) process.exit(1);
 }
 NODE
 log "JSONC, unknown fields, other servers, exact naming, and staged-only validation passed"
@@ -581,11 +652,29 @@ grep -q 'killed with SIGKILL' "$schema_stubborn_output" || {
 }
 for schema_mode in missing extra bad-query extra-required narrow-results fixed-enum \
   query-pattern query-min-length query-max-length root-all-of root-dialect root-recursive-ref \
-  root-const dependent-required pattern-properties \
-  min-properties max-properties query-ref results-conditional narrow-urls unique-urls \
+  root-const dependent-required pattern-properties invalid-additional-null invalid-additional-array \
+  invalid-additional-number invalid-additional-string negative-min-properties \
+  min-properties max-properties query-ref results-conditional narrow-urls negative-min-items \
+  fractional-min-items fractional-max-items unique-urls \
   urls-ref url-items-conditional exclusive-characters characters-ref; do
   expect_failure "invalid schema $schema_mode" 1 'schema response validation failed' env SCHEMA_MODE="$schema_mode" \
     MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" bash "$BASE_DIR/scripts/check.sh"
+done
+SCHEMA_MODE=paged MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+  bash "$BASE_DIR/scripts/check.sh" >/dev/null
+SCHEMA_MODE=exact-page-limit MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+  bash "$BASE_DIR/scripts/check.sh" >/dev/null
+expect_failure "exactly 64 schema tools pass discovery" 1 'schema response validation failed' env \
+  SCHEMA_MODE=exact-tool-limit MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+  bash "$BASE_DIR/scripts/check.sh"
+expect_failure "extra tool on a later schema page" 1 'schema response validation failed' env \
+  SCHEMA_MODE=paged-extra MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+  bash "$BASE_DIR/scripts/check.sh"
+for pagination_mode in repeated-cursor cursor-cycle invalid-cursor oversized-cursor tool-limit \
+  cross-page-tool-limit page-limit schema-byte-limit; do
+  expect_failure "invalid schema pagination $pagination_mode" 1 'schema discovery failed' env \
+    SCHEMA_MODE="$pagination_mode" MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+    bash "$BASE_DIR/scripts/check.sh"
 done
 smoke_log="$TMP_ROOT/smoke-calls.log"
 MCP_CALL_LOG="$smoke_log" RUN_SMOKE=1 MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \

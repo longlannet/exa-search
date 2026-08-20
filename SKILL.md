@@ -18,7 +18,7 @@ Use Exa when semantic relevance matters more than exact keyword matching: explor
 
 ## Setup
 
-Require Linux, Node 22 or 24, npm, and GNU coreutils. OpenClaw's `Ready` state checks these host prerequisites only; it does not mean the skill-local locked dependencies are installed.
+Require Linux, Node 22.12 or later in the 22.x line, or Node 24.x, plus npm and GNU coreutils. OpenClaw's `Ready` state checks these host prerequisites only; it does not mean the skill-local locked dependencies are installed or that Node satisfies the minimum version.
 
 Materialize the locked local runtime, then configure the project-local anonymous endpoint once:
 

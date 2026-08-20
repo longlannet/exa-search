@@ -1,0 +1,529 @@
+name: Publish signed release
+run-name: Publish signed release ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed stable tag (for example, v0.4.2)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify signed tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Validate dispatch context
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+      - name: Check out the trusted gate from the default branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: gate
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Check out the candidate tag separately
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: candidate
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Install pinned GitHub CLI
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/gate/scripts/install-gh-cli.sh"
+      - name: Verify the tag and checked-out commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          candidate_commit="$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse --verify 'HEAD^{commit}')"
+          RELEASE_REPOSITORY="$GITHUB_WORKSPACE/candidate" \
+            bash "$GITHUB_WORKSPACE/gate/scripts/verify-release-tag.sh" \
+              "$RELEASE_TAG" "$candidate_commit"
+      - name: Verify remote identity, exact main commit, and successful push CI
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(gh --version | awk 'NR == 1 { print $3 }')" = 2.97.0
+          candidate="$GITHUB_WORKSPACE/candidate"
+          tag_ref="refs/tags/$RELEASE_TAG"
+          candidate_commit="$(git -C "$candidate" rev-parse --verify 'HEAD^{commit}')"
+          local_tag_oid="$(git -C "$candidate" rev-parse --verify "$tag_ref")"
+          remote_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$tag_ref")"
+          read -r remote_tag_oid remote_ref extra <<<"$remote_line"
+          test -z "${extra:-}"
+          test "$remote_ref" = "$tag_ref"
+          test "$remote_tag_oid" = "$local_tag_oid"
+          test "$candidate_commit" = "$GITHUB_SHA"
+          main_ref="refs/heads/$DEFAULT_BRANCH"
+          remote_main_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$main_ref")"
+          read -r remote_main_oid remote_main_ref extra <<<"$remote_main_line"
+          test -z "${extra:-}"
+          test "$remote_main_ref" = "$main_ref"
+          test "$remote_main_oid" = "$GITHUB_SHA"
+          ci_runs="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$candidate_commit&event=push&status=completed&per_page=100")"
+          jq -e --arg branch "$DEFAULT_BRANCH" --arg sha "$candidate_commit" '
+            .workflow_runs | any(
+              .head_branch == $branch and .head_sha == $sha and
+              .event == "push" and .status == "completed" and .conclusion == "success"
+            )
+          ' <<<"$ci_runs" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$local_tag_oid" |
+            jq -e '.verification.verified == true and .verification.reason == "valid"' >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/commits/$candidate_commit" |
+            jq -e '.commit.verification.verified == true and .commit.verification.reason == "valid"' >/dev/null
+
+  publish:
+    name: Publish immutable release
+    needs: verify
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    steps:
+      - name: Check out the trusted gate from the default branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: gate
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Check out the candidate tag separately
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: candidate
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Install pinned GitHub CLI
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/gate/scripts/install-gh-cli.sh"
+      - name: Reverify tag, remote identity, and GitHub signature status
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(gh --version | awk 'NR == 1 { print $3 }')" = 2.97.0
+          candidate="$GITHUB_WORKSPACE/candidate"
+          candidate_commit="$(git -C "$candidate" rev-parse --verify 'HEAD^{commit}')"
+          RELEASE_REPOSITORY="$candidate" \
+            bash "$GITHUB_WORKSPACE/gate/scripts/verify-release-tag.sh" \
+              "$RELEASE_TAG" "$candidate_commit"
+          tag_ref="refs/tags/$RELEASE_TAG"
+          local_tag_oid="$(git -C "$candidate" rev-parse --verify "$tag_ref")"
+          remote_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$tag_ref")"
+          read -r remote_tag_oid remote_ref extra <<<"$remote_line"
+          test -z "${extra:-}"
+          test "$remote_ref" = "$tag_ref"
+          test "$remote_tag_oid" = "$local_tag_oid"
+          test "$candidate_commit" = "$GITHUB_SHA"
+          main_ref="refs/heads/$DEFAULT_BRANCH"
+          remote_main_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$main_ref")"
+          read -r remote_main_oid remote_main_ref extra <<<"$remote_main_line"
+          test -z "${extra:-}"
+          test "$remote_main_ref" = "$main_ref"
+          test "$remote_main_oid" = "$GITHUB_SHA"
+          ci_runs="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$candidate_commit&event=push&status=completed&per_page=100")"
+          jq -e --arg branch "$DEFAULT_BRANCH" --arg sha "$candidate_commit" '
+            .workflow_runs | any(
+              .head_branch == $branch and .head_sha == $sha and
+              .event == "push" and .status == "completed" and .conclusion == "success"
+            )
+          ' <<<"$ci_runs" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$local_tag_oid" |
+            jq -e '.verification.verified == true and .verification.reason == "valid"' >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/commits/$candidate_commit" |
+            jq -e '.commit.verification.verified == true and .commit.verification.reason == "valid"' >/dev/null
+      - name: Require protected environment, active rulesets, and immutable releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+          MAIN_RULESET_ID: ${{ vars.RELEASE_MAIN_RULESET_ID }}
+          TAG_RULESET_ID: ${{ vars.RELEASE_TAG_RULESET_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          [[ "$MAIN_RULESET_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TAG_RULESET_ID" =~ ^[1-9][0-9]*$ ]]
+
+          environment_json="$(gh api "repos/$GITHUB_REPOSITORY/environments/release")"
+          jq -e '
+            .name == "release" and
+            .can_admins_bypass == false and
+            .deployment_branch_policy.protected_branches == true and
+            .deployment_branch_policy.custom_branch_policies == false and
+            any(.protection_rules[]?;
+              .type == "required_reviewers" and .prevent_self_review == true and
+              ((.reviewers // []) | length) > 0
+            )
+          ' <<<"$environment_json" >/dev/null
+
+          main_ruleset="$(gh api \
+            "repos/$GITHUB_REPOSITORY/rulesets/$MAIN_RULESET_ID?includes_parents=true")"
+          jq -e --argjson id "$MAIN_RULESET_ID" '
+            .id == $id and .target == "branch" and .enforcement == "active" and
+            ((.bypass_actors | type) == "array") and ((.bypass_actors | length) == 0) and
+            .conditions.ref_name.include == ["~DEFAULT_BRANCH"] and
+            ((.conditions.ref_name.exclude // []) | length) == 0 and
+            ([.rules[]?.type] | index("deletion")) != null and
+            ([.rules[]?.type] | index("non_fast_forward")) != null and
+            ([.rules[]?.type] | index("required_signatures")) != null and
+            ([.rules[]? | select(.type == "required_status_checks")] | length) == 1 and
+            ([.rules[]? | select(.type == "required_status_checks")][0].parameters |
+              .strict_required_status_checks_policy == true and
+              .do_not_enforce_on_create == false and
+              ([.required_status_checks[]? | { context, integration_id }] | sort_by(.context)) ==
+              ([
+                { context: "test (22.12.0)", integration_id: 15368 },
+                { context: "test (22)", integration_id: 15368 },
+                { context: "test (24)", integration_id: 15368 }
+              ] | sort_by(.context))
+            )
+          ' <<<"$main_ruleset" >/dev/null
+
+          tag_ruleset="$(gh api \
+            "repos/$GITHUB_REPOSITORY/rulesets/$TAG_RULESET_ID?includes_parents=true")"
+          jq -e --argjson id "$TAG_RULESET_ID" '
+            .id == $id and .target == "tag" and .enforcement == "active" and
+            ((.bypass_actors | type) == "array") and ((.bypass_actors | length) == 0) and
+            .conditions.ref_name.include == ["refs/tags/v*"] and
+            ((.conditions.ref_name.exclude // []) | length) == 0 and
+            ([.rules[]?.type] | index("update")) != null and
+            ([.rules[]?.type] | index("deletion")) != null
+          ' <<<"$tag_ruleset" >/dev/null
+
+          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = true
+          gh release verify --help >/dev/null
+          gh release verify-asset --help >/dev/null
+      - name: Build deterministic source assets
+        id: assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/exa-search-$RELEASE_TAG.tar.gz"
+          checksums="$RUNNER_TEMP/SHA256SUMS"
+          notes="$RUNNER_TEMP/RELEASE_NOTES.md"
+          tag_content="$RUNNER_TEMP/release-tag-content"
+          tag_signature="$RUNNER_TEMP/release-tag-signature"
+          git -C "$GITHUB_WORKSPACE/candidate" archive \
+            --format=tar --prefix="exa-search-$RELEASE_TAG/" "refs/tags/$RELEASE_TAG" |
+            gzip -n -9 >"$archive"
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum "$(basename -- "$archive")" >"$(basename -- "$checksums")"
+          )
+          git -C "$GITHUB_WORKSPACE/candidate" tag --list "$RELEASE_TAG" \
+            --format='%(contents)' >"$tag_content"
+          git -C "$GITHUB_WORKSPACE/candidate" tag --list "$RELEASE_TAG" \
+            --format='%(contents:signature)' >"$tag_signature"
+          node - "$tag_content" "$tag_signature" "$notes" <<'NODE'
+          const fs = require("node:fs");
+          const [contentPath, signaturePath, notesPath] = process.argv.slice(2);
+          const content = fs.readFileSync(contentPath);
+          const signature = fs.readFileSync(signaturePath);
+          const suffix = Buffer.concat([Buffer.from("\n"), signature]);
+          if (signature.length === 0 || content.length < suffix.length ||
+              !content.subarray(content.length - suffix.length).equals(suffix)) {
+            throw new Error("signed tag content does not end with its exact signature block");
+          }
+          fs.writeFileSync(notesPath, content.subarray(0, content.length - suffix.length), { mode: 0o600 });
+          NODE
+          printf 'archive=%s\nchecksums=%s\nnotes=%s\n' \
+            "$archive" "$checksums" "$notes" >>"$GITHUB_OUTPUT"
+      - name: Create or validate the exact release draft
+        id: release_state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_ARCHIVE: ${{ steps.assets.outputs.archive }}
+          SOURCE_CHECKSUMS: ${{ steps.assets.outputs.checksums }}
+          SOURCE_NOTES: ${{ steps.assets.outputs.notes }}
+        run: |
+          set -euo pipefail
+          if ! release_id="$(bash "$GITHUB_WORKSPACE/gate/scripts/find-release-id.sh" \
+            "$GITHUB_REPOSITORY" "$RELEASE_TAG")"; then
+            echo "release lookup failed" >&2
+            exit 1
+          fi
+          if [ -z "$release_id" ]; then
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --latest=false \
+              --notes-file "$SOURCE_NOTES" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$RELEASE_TAG" \
+              --verify-tag
+            for _ in 1 2 3 4 5; do
+              if ! release_id="$(bash "$GITHUB_WORKSPACE/gate/scripts/find-release-id.sh" \
+                "$GITHUB_REPOSITORY" "$RELEASE_TAG")"; then
+                echo "release lookup failed after draft creation" >&2
+                exit 1
+              fi
+              [ -z "$release_id" ] || break
+              sleep 1
+            done
+          fi
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          release_api="repos/$GITHUB_REPOSITORY/releases/$release_id"
+          release_json="$(gh api "$release_api")"
+
+          if jq -e '.immutable == true and .draft == false' <<<"$release_json" >/dev/null; then
+            state=immutable
+          elif jq -e '.immutable == false and .draft == true' <<<"$release_json" >/dev/null; then
+            state=draft
+          elif jq -e '.immutable == false and .draft == false' <<<"$release_json" >/dev/null; then
+            state=""
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+              sleep 3
+              release_json="$(gh api "$release_api")"
+              if jq -e '.immutable == true and .draft == false' \
+                <<<"$release_json" >/dev/null; then
+                state=immutable
+                break
+              fi
+              jq -e '.immutable == false and .draft == false' \
+                <<<"$release_json" >/dev/null
+            done
+            if [ "$state" != immutable ]; then
+              echo "published release did not become immutable" >&2
+              exit 1
+            fi
+          else
+            echo "release exists in an unexpected state" >&2
+            exit 1
+          fi
+
+          refresh_release() {
+            release_json="$(gh api "$release_api")"
+          }
+          ensure_asset() {
+            local asset_path="$1"
+            local asset_label="$2"
+            local asset_name expected_digest match_count actual_digest actual_label
+            asset_name="$(basename -- "$asset_path")"
+            expected_digest="sha256:$(sha256sum "$asset_path" | awk '{ print $1 }')"
+            match_count="$(jq --arg name "$asset_name" \
+              '[.assets[]? | select(.name == $name)] | length' <<<"$release_json")"
+            if [ "$match_count" = 0 ] && [ "$state" = draft ]; then
+              gh release upload "$RELEASE_TAG" "$asset_path#$asset_label" \
+                --repo "$GITHUB_REPOSITORY"
+              refresh_release
+              match_count="$(jq --arg name "$asset_name" \
+                '[.assets[]? | select(.name == $name)] | length' <<<"$release_json")"
+            fi
+            test "$match_count" = 1
+            actual_digest="$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+            actual_label="$(jq -r --arg name "$asset_name" \
+              '.assets[] | select(.name == $name) | (.label // "")' <<<"$release_json")"
+            test "$actual_digest" = "$expected_digest"
+            test "$actual_label" = "$asset_label"
+          }
+
+          ensure_asset "$SOURCE_ARCHIVE" "Deterministic source archive"
+          ensure_asset "$SOURCE_CHECKSUMS" "SHA-256 checksums"
+          archive_name="$(basename -- "$SOURCE_ARCHIVE")"
+          checksums_name="$(basename -- "$SOURCE_CHECKSUMS")"
+          jq -e --arg archive "$archive_name" --arg checksums "$checksums_name" \
+            --arg tag "$RELEASE_TAG" --rawfile body "$SOURCE_NOTES" '
+              .tag_name == $tag and .name == $tag and .body == $body and .prerelease == false and
+              .author.login == "github-actions[bot]" and .author.id == 41898282 and
+              ([.assets[].name] | sort) == ([$archive, $checksums] | sort)
+            ' <<<"$release_json" >/dev/null
+          printf 'state=%s\nrelease_id=%s\n' "$state" "$release_id" >>"$GITHUB_OUTPUT"
+      - name: Publish the verified draft or reuse the immutable release
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ADMIN_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+          RELEASE_ID: ${{ steps.release_state.outputs.release_id }}
+          RELEASE_STATE: ${{ steps.release_state.outputs.state }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_ARCHIVE: ${{ steps.assets.outputs.archive }}
+          SOURCE_CHECKSUMS: ${{ steps.assets.outputs.checksums }}
+          SOURCE_NOTES: ${{ steps.assets.outputs.notes }}
+        run: |
+          set -euo pipefail
+          candidate="$GITHUB_WORKSPACE/candidate"
+          tag_ref="refs/tags/$RELEASE_TAG"
+          local_tag_oid="$(git -C "$candidate" rev-parse --verify "$tag_ref")"
+          remote_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$tag_ref")"
+          read -r remote_tag_oid remote_ref extra <<<"$remote_line"
+          test -z "${extra:-}"
+          test "$remote_ref" = "$tag_ref"
+          test "$remote_tag_oid" = "$local_tag_oid"
+          main_ref="refs/heads/$DEFAULT_BRANCH"
+          remote_main_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$main_ref")"
+          read -r remote_main_oid remote_main_ref extra <<<"$remote_main_line"
+          test -z "${extra:-}"
+          test "$remote_main_ref" = "$main_ref"
+          test "$remote_main_oid" = "$GITHUB_SHA"
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
+          archive_name="$(basename -- "$SOURCE_ARCHIVE")"
+          checksums_name="$(basename -- "$SOURCE_CHECKSUMS")"
+          archive_digest="sha256:$(sha256sum "$SOURCE_ARCHIVE" | awk '{ print $1 }')"
+          checksums_digest="sha256:$(sha256sum "$SOURCE_CHECKSUMS" | awk '{ print $1 }')"
+          jq -e --arg archive "$archive_name" --arg archive_digest "$archive_digest" \
+            --arg checksums "$checksums_name" --arg checksums_digest "$checksums_digest" \
+            --arg tag "$RELEASE_TAG" --rawfile body "$SOURCE_NOTES" '
+              .tag_name == $tag and .name == $tag and .body == $body and .prerelease == false and
+              .author.login == "github-actions[bot]" and .author.id == 41898282 and
+              ([.assets[] | { name, label, digest }] | sort_by(.name)) ==
+              ([
+                { name: $archive, label: "Deterministic source archive", digest: $archive_digest },
+                { name: $checksums, label: "SHA-256 checksums", digest: $checksums_digest }
+              ] | sort_by(.name))
+            ' <<<"$release_json" >/dev/null
+          if [ "$RELEASE_STATE" = immutable ]; then
+            jq -e '.immutable == true and .draft == false' <<<"$release_json" >/dev/null
+            exit 0
+          fi
+          test "$RELEASE_STATE" = draft
+          jq -e '.immutable == false and .draft == true' <<<"$release_json" >/dev/null
+          test -n "$RELEASE_ADMIN_TOKEN"
+          test "$(GH_TOKEN="$RELEASE_ADMIN_TOKEN" \
+            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = true
+          remote_main_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$main_ref")"
+          read -r remote_main_oid remote_main_ref extra <<<"$remote_main_line"
+          test -z "${extra:-}"
+          test "$remote_main_ref" = "$main_ref"
+          test "$remote_main_oid" = "$GITHUB_SHA"
+          publication_payload="$RUNNER_TEMP/release-publication.json"
+          jq -n --arg name "$RELEASE_TAG" --rawfile body "$SOURCE_NOTES" '{
+            name: $name,
+            body: $body,
+            draft: false,
+            prerelease: false,
+            make_latest: "true"
+          }' >"$publication_payload"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --input "$publication_payload" >/dev/null
+      - name: Verify immutable release attestation and assets
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release_state.outputs.release_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_ARCHIVE: ${{ steps.assets.outputs.archive }}
+          SOURCE_CHECKSUMS: ${{ steps.assets.outputs.checksums }}
+          SOURCE_NOTES: ${{ steps.assets.outputs.notes }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2153 # RELEASE_ID is populated from the release_state output.
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          release_api="repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
+          immutable_ready=false
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            release_json="$(gh api "$release_api")"
+            if jq -e '.immutable == true and .draft == false' \
+              <<<"$release_json" >/dev/null; then
+              immutable_ready=true
+              break
+            fi
+            jq -e '.immutable == false and (.draft == true or .draft == false)' \
+              <<<"$release_json" >/dev/null
+            sleep 3
+          done
+          if [ "$immutable_ready" != true ]; then
+            echo "published release did not become immutable" >&2
+            exit 1
+          fi
+          archive_digest="sha256:$(sha256sum "$SOURCE_ARCHIVE" | awk '{ print $1 }')"
+          checksums_digest="sha256:$(sha256sum "$SOURCE_CHECKSUMS" | awk '{ print $1 }')"
+          verify_immutable_release() {
+            jq -e --arg archive "$(basename -- "$SOURCE_ARCHIVE")" \
+              --arg archive_digest "$archive_digest" \
+              --arg checksums "$(basename -- "$SOURCE_CHECKSUMS")" \
+              --arg checksums_digest "$checksums_digest" \
+              --arg tag "$RELEASE_TAG" --rawfile body "$SOURCE_NOTES" '
+                .tag_name == $tag and .name == $tag and .body == $body and .prerelease == false and
+                .author.login == "github-actions[bot]" and .author.id == 41898282 and
+                .immutable == true and .draft == false and
+                ([.assets[] | { name, label, digest }] | sort_by(.name)) ==
+                ([
+                  { name: $archive, label: "Deterministic source archive", digest: $archive_digest },
+                  { name: $checksums, label: "SHA-256 checksums", digest: $checksums_digest }
+                ] | sort_by(.name))
+              ' <<<"$release_json" >/dev/null
+          }
+          verify_immutable_release
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          latest_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.id')"
+          test "$release_id" = "$latest_id"
+          verified=false
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            if gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" &&
+              gh release verify-asset "$RELEASE_TAG" "$SOURCE_ARCHIVE" \
+                --repo "$GITHUB_REPOSITORY" &&
+              gh release verify-asset "$RELEASE_TAG" "$SOURCE_CHECKSUMS" \
+                --repo "$GITHUB_REPOSITORY"; then
+              verified=true
+              break
+            fi
+            sleep 3
+          done
+          test "$verified" = true
+          release_json="$(gh api "$release_api")"
+          verify_immutable_release
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          latest_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.id')"
+          test "$release_id" = "$latest_id"
+          candidate="$GITHUB_WORKSPACE/candidate"
+          tag_ref="refs/tags/$RELEASE_TAG"
+          local_tag_oid="$(git -C "$candidate" rev-parse --verify "$tag_ref")"
+          remote_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$tag_ref")"
+          read -r remote_tag_oid remote_ref extra <<<"$remote_line"
+          test -z "${extra:-}"
+          test "$remote_ref" = "$tag_ref"
+          test "$remote_tag_oid" = "$local_tag_oid"
+          main_ref="refs/heads/$DEFAULT_BRANCH"
+          remote_main_line="$(git -C "$candidate" ls-remote --exit-code --refs origin "$main_ref")"
+          read -r remote_main_oid remote_main_ref extra <<<"$remote_main_line"
+          test -z "${extra:-}"
+          test "$remote_main_ref" = "$main_ref"
+          test "$remote_main_oid" = "$GITHUB_SHA"

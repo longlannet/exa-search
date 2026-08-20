@@ -12,13 +12,14 @@ permissions:
 
 jobs:
   test:
+    name: test (${{ matrix.node }})
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        node: [22, 24]
+        node: ["22.12.0", 22, 24]
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -55,41 +56,11 @@ jobs:
           "$RUNNER_TEMP/shellcheck-v0.9.0/shellcheck" -x scripts/*.sh
           for file in scripts/*.mjs; do node --check "$file"; done
           node scripts/validate-skill.mjs SKILL.md
-          "$RUNNER_TEMP/actionlint" -color .github/workflows/ci.yml
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/*.yml
       - name: Anonymous-only contract regressions
         run: |
-          fixture="$RUNNER_TEMP/exa-search-validator"
-          mkdir -p "$fixture/.github/workflows" "$fixture/config" "$fixture/scripts"
-          cp README.md SKILL.md package.json "$fixture/"
-          cp .github/workflows/ci.yml "$fixture/.github/workflows/"
-          cp config/mcporter.json.example "$fixture/config/"
-          cp scripts/validate-skill.mjs "$fixture/scripts/"
-          ln -s "$GITHUB_WORKSPACE/node_modules" "$fixture/node_modules"
-          node - "$fixture/SKILL.md" <<'NODE'
-          const fs = require("node:fs");
-          const file = process.argv[2];
-          const text = fs.readFileSync(file, "utf8").replace(
-            '"os": ["linux"],',
-            '"os": ["linux"], "primaryEnv": "EXA_API_KEY",',
-          );
-          fs.writeFileSync(file, text);
-          NODE
-          if node "$fixture/scripts/validate-skill.mjs" "$fixture/SKILL.md"; then
-            echo "validator accepted API-key metadata" >&2
-            exit 1
-          fi
-          cp SKILL.md "$fixture/SKILL.md"
-          node - "$fixture/config/mcporter.json.example" <<'NODE'
-          const fs = require("node:fs");
-          const file = process.argv[2];
-          const value = JSON.parse(fs.readFileSync(file, "utf8"));
-          value.mcpServers.exa.headers = { Authorization: "Bearer forbidden" };
-          fs.writeFileSync(file, `${JSON.stringify(value)}\n`);
-          NODE
-          if node "$fixture/scripts/validate-skill.mjs" "$fixture/SKILL.md"; then
-            echo "validator accepted authenticated Exa config" >&2
-            exit 1
-          fi
+          node scripts/validator-fixture-test.mjs
+          node scripts/release-lookup-fixture-test.mjs
       - name: Clean archive adversarial selftest
         working-directory: /tmp
         run: |
