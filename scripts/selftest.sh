@@ -85,6 +85,7 @@ node --input-type=module - "$REAL_PACKAGE_ROOT/package.json" \
   "$TMP_ROOT/drifted-mcporter/package.json" "$TMP_ROOT/drifted-mcporter/node_modules" <<'NODE'
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 const [realManifestPath, fakeManifestPath, fakeNodeModules, driftedManifestPath, driftedNodeModules] = process.argv.slice(2);
 const realManifest = JSON.parse(fs.readFileSync(realManifestPath, "utf8"));
 const fakeManifest = `${JSON.stringify({
@@ -117,7 +118,42 @@ for (const name of Object.keys(realManifest.dependencies ?? {})) {
   }
   const target = path.join(fakeNodeModules, ...name.split("/"));
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.symlinkSync(packageRoot, target, "dir");
+  if (name === "@modelcontextprotocol/sdk") {
+    fs.mkdirSync(path.join(target, "dist/esm/client"), { recursive: true });
+    fs.copyFileSync(path.join(packageRoot, "package.json"), path.join(target, "package.json"));
+    fs.symlinkSync(path.resolve(packageRoot, "../.."), path.join(target, "node_modules"), "dir");
+    const runtimeUrl = pathToFileURL(path.join(path.dirname(fakeManifestPath), "dist/index.js")).href;
+    fs.writeFileSync(path.join(target, "dist/esm/client/index.js"), `
+import { createRuntime } from ${JSON.stringify(runtimeUrl)};
+export class Client {
+  constructor(info, options) {
+    if (typeof options?.jsonSchemaValidator?.getValidator !== "function") throw new Error("schema policy missing");
+  }
+  async connect(transport) {
+    if (String(transport.url) !== "https://mcp.exa.ai/mcp" || transport.options.authProvider ||
+        typeof transport.options.fetch !== "function") throw new Error("anonymous bounded transport required");
+    this.connection = await (await createRuntime({})).connect("exa", {
+      maxOAuthAttempts: 0, skipCache: true, allowCachedAuth: false,
+    });
+  }
+  request(request) {
+    if (request.method !== "tools/list") throw new Error("unexpected MCP request");
+    return this.connection.client.listTools(request.params);
+  }
+  callTool(...args) { return this.connection.client.callTool(...args); }
+  async close() { await this.connection?.client.close(); }
+}
+`);
+    fs.writeFileSync(path.join(target, "dist/esm/client/streamableHttp.js"), `
+export class StreamableHTTPClientTransport {
+  constructor(url, options) { this.url = url; this.options = options; }
+  async close() {}
+}
+`);
+    fs.writeFileSync(path.join(target, "dist/esm/types.js"), "export const ListToolsResultSchema = {};\n");
+  } else {
+    fs.symlinkSync(packageRoot, target, "dir");
+  }
   const driftedTarget = path.join(driftedNodeModules, ...name.split("/"));
   fs.mkdirSync(path.dirname(driftedTarget), { recursive: true });
   if (name === "jsonc-parser") {
@@ -178,7 +214,8 @@ function schema(mode) {
     { name: "web_search_exa", inputSchema: { $schema: "http://json-schema.org/draft-07/schema#",
       type: "object", additionalProperties: false, properties: {
       query: { type: "string", minLength: 1 }, numResults: { type: "number", minimum: 1, maximum: 10 },
-    }, required: ["query"] } },
+      objective: { type: "string", minLength: 1, maxLength: 4096 },
+    }, required: ["query", "objective"] } },
     { name: "web_fetch_exa", inputSchema: { type: "object", additionalProperties: false, properties: {
       urls: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },
       maxCharacters: { type: "number", minimum: 1, maximum: 100000 },
@@ -204,7 +241,7 @@ function schema(mode) {
   if (mode === "invalid-additional-number") tools[0].inputSchema.additionalProperties = 0;
   if (mode === "invalid-additional-string") tools[0].inputSchema.additionalProperties = "false";
   if (mode === "negative-min-properties") tools[0].inputSchema.minProperties = -1;
-  if (mode === "min-properties") tools[0].inputSchema.minProperties = 3;
+  if (mode === "min-properties") tools[0].inputSchema.minProperties = 4;
   if (mode === "max-properties") tools[0].inputSchema.maxProperties = 1;
   if (mode === "query-ref") tools[0].inputSchema.properties.query.$ref = "https://example.invalid/false-schema";
   if (mode === "results-conditional") {
@@ -237,7 +274,7 @@ async function hang(mode) {
   await new Promise(() => setInterval(() => {}, 1000));
 }
 export async function createRuntime(options) {
-  readConfig(options.configPath);
+  if (options.configPath) readConfig(options.configPath);
   return {
     async connect(server, connectOptions) {
       if (connectOptions?.maxOAuthAttempts !== 0 || connectOptions?.skipCache !== true ||
@@ -444,7 +481,7 @@ expect_failure "doctor before commit" 1 'staged configuration validation failed'
   CONFIG_FILE="$failure_config" RUN_CHECK=0 bash "$BASE_DIR/scripts/install.sh"
 [ "$before" = "$(digest "$failure_config")" ] || fail "doctor failure changed live config"
 assert_no_transaction_files "$failure_config"
-expect_failure "schema before commit" 1 'schema response validation failed' env SCHEMA_MODE=bad-query MCPORTER_BIN="$FAKE_MCPORTER" \
+expect_failure "schema before commit" 1 'SCHEMA_MISMATCH' env SCHEMA_MODE=bad-query MCPORTER_BIN="$FAKE_MCPORTER" \
   CONFIG_FILE="$failure_config" RUN_CHECK=1 bash "$BASE_DIR/scripts/install.sh"
 [ "$before" = "$(digest "$failure_config")" ] || fail "schema failure changed live config"
 assert_no_transaction_files "$failure_config"
@@ -507,7 +544,7 @@ cp -- "$failure_config" "$race_config"
 victim="$TMP_ROOT/config/victim.txt"
 printf 'victim\n' >"$victim"
 chmod 644 "$victim"
-expect_failure "destination swap" 1 'failed to commit Exa config safely|refusing symlink config' env \
+expect_failure "destination swap" 1 'failed to commit Exa config safely|refusing symlink config|unsafe transaction artifact requires manual inspection' env \
   MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$race_config" RUN_CHECK=0 \
   SWAP_CONFIG_PATH="$race_config" SWAP_VICTIM_PATH="$victim" SWAP_MARKER_PATH="$TMP_ROOT/swap.marker" \
   bash "$BASE_DIR/scripts/install.sh"
@@ -546,14 +583,39 @@ log "default editor imports disabled; hostile Cursor definitions were not loaded
 call_config="$TMP_ROOT/config/call.json"
 cp -- "$failure_config" "$call_config"
 call_log="$TMP_ROOT/mcp-calls.log"
+for invalid_runtime in /bin/true "$FAKE_OTHER_BIN" "$DRIFTED_MCPORTER"; do
+  expect_failure "search runtime diagnosis" 1 'DEPENDENCY_ERROR' env MCPORTER_BIN="$invalid_runtime" \
+    CONFIG_FILE="$call_config" MCP_CALL_LOG="$call_log" bash "$BASE_DIR/scripts/call.sh" search 1 test
+  expect_failure "check runtime diagnosis" 1 'DEPENDENCY_ERROR' env MCPORTER_BIN="$invalid_runtime" \
+    CONFIG_FILE="$call_config" MCP_CALL_LOG="$call_log" bash "$BASE_DIR/scripts/check.sh"
+done
+[ ! -s "$call_log" ] || fail "unsupported runtime reached MCP"
 query=$'semantic query with spaces, \047quotes\047, $dollar, and\nnewline'
 MCP_CALL_LOG="$call_log" MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
   bash "$BASE_DIR/scripts/call.sh" search 3 "$query" >/dev/null
 node - "$call_log" "$query" <<'NODE'
 const value = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8").trim());
 if (value.server !== "exa" || value.tool !== "web_search_exa" || value.args.query !== process.argv[3] || value.args.numResults !== 3) process.exit(1);
+if (typeof value.args.objective !== "string" || !value.args.objective.trim() || value.args.objective.length > 4096) process.exit(1);
 NODE
 : >"$call_log"
+objective=$'Prioritize primary sources, "quotes", $(false), and\nexact evidence'
+MCP_CALL_LOG="$call_log" MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+  bash "$BASE_DIR/scripts/call.sh" search 3 "$query" --objective "$objective" >/dev/null
+node - "$call_log" "$query" "$objective" <<'NODE'
+const value = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8").trim());
+if (value.args.query !== process.argv[3] || value.args.objective !== process.argv[4]) process.exit(1);
+NODE
+: >"$call_log"
+for objective in '' '   '; do
+  expect_failure "empty search objective" 1 'INVALID_ARGUMENT' env MCP_CALL_LOG="$call_log" \
+    MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+    bash "$BASE_DIR/scripts/call.sh" search 1 test --objective "$objective"
+done
+expect_failure "missing objective value" 1 'INVALID_ARGUMENT' env MCP_CALL_LOG="$call_log" \
+  MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
+  bash "$BASE_DIR/scripts/call.sh" search 1 test --objective
+[ ! -s "$call_log" ] || fail "invalid objective reached MCP runtime"
 for url in 'http://127.1/' 'http://240.0.0.1/' 'http://[::ffff:127.0.0.1]/' 'http://[2001::1]/' \
   'http://[fec0::1]/' 'http://[::127.0.0.1]/' 'http://[::ffff:0:127.0.0.1]/' \
   'http://[64:ff9b::127.0.0.1]/' \
@@ -585,7 +647,7 @@ for rejected_kind in authenticated custom; do
       ;;
   esac
   chmod 600 "$rejected_config"
-  expect_failure "pre-connect $rejected_kind config" 1 'official anonymous endpoint|official anonymous policy' \
+  expect_failure "pre-connect $rejected_kind config" 1 'CONFIG_ERROR' \
     env MCP_HTTP_LOG="$http_log" node "$BASE_DIR/scripts/exa-call.mjs" call \
       "$FAKE_MCPORTER" "$rejected_config" 500 search 1 test
 done
@@ -657,22 +719,22 @@ for schema_mode in missing extra bad-query extra-required narrow-results fixed-e
   min-properties max-properties query-ref results-conditional narrow-urls negative-min-items \
   fractional-min-items fractional-max-items unique-urls \
   urls-ref url-items-conditional exclusive-characters characters-ref; do
-  expect_failure "invalid schema $schema_mode" 1 'schema response validation failed' env SCHEMA_MODE="$schema_mode" \
+  expect_failure "invalid schema $schema_mode" 1 'SCHEMA_MISMATCH' env SCHEMA_MODE="$schema_mode" \
     MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" bash "$BASE_DIR/scripts/check.sh"
 done
 SCHEMA_MODE=paged MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
   bash "$BASE_DIR/scripts/check.sh" >/dev/null
 SCHEMA_MODE=exact-page-limit MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
   bash "$BASE_DIR/scripts/check.sh" >/dev/null
-expect_failure "exactly 64 schema tools pass discovery" 1 'schema response validation failed' env \
+expect_failure "exactly 64 schema tools pass discovery" 1 'SCHEMA_MISMATCH' env \
   SCHEMA_MODE=exact-tool-limit MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
   bash "$BASE_DIR/scripts/check.sh"
-expect_failure "extra tool on a later schema page" 1 'schema response validation failed' env \
+expect_failure "extra tool on a later schema page" 1 'SCHEMA_MISMATCH' env \
   SCHEMA_MODE=paged-extra MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
   bash "$BASE_DIR/scripts/check.sh"
 for pagination_mode in repeated-cursor cursor-cycle invalid-cursor oversized-cursor tool-limit \
   cross-page-tool-limit page-limit schema-byte-limit; do
-  expect_failure "invalid schema pagination $pagination_mode" 1 'schema discovery failed' env \
+  expect_failure "invalid schema pagination $pagination_mode" 1 'SCHEMA_MISMATCH' env \
     SCHEMA_MODE="$pagination_mode" MCPORTER_BIN="$FAKE_MCPORTER" CONFIG_FILE="$call_config" \
     bash "$BASE_DIR/scripts/check.sh"
 done
@@ -791,4 +853,8 @@ while IFS= read -r line; do
   if [ "$line" = 'node_modules/' ]; then node_modules_ignored=1; break; fi
 done <"$BASE_DIR/.gitignore"
 [ "$node_modules_ignored" -eq 1 ] || fail "locked dependency installation artifacts are not ignored"
+node "$BASE_DIR/scripts/config-transaction-fixture-test.mjs"
+node "$BASE_DIR/scripts/transport-fixture-test.mjs"
+node "$BASE_DIR/scripts/error-fixture-test.mjs"
+node "$BASE_DIR/scripts/diagnostic-fixture-test.mjs"
 log "selftest complete"
