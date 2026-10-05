@@ -26,7 +26,8 @@ function schema(overrides = {}) {
       { name: "web_search_exa", inputSchema: { $schema: "http://json-schema.org/draft-07/schema#",
         type: "object", additionalProperties: false, properties: {
         query: { type: "string", minLength: 1 }, numResults: { type: "number", minimum: 1, maximum: 10 },
-      }, required: ["query"] } },
+        objective: { type: "string", minLength: 1, maxLength: 4096 },
+      }, required: ["query", "objective"] } },
       { name: "web_fetch_exa", inputSchema: { type: "object", additionalProperties: false, properties: {
         urls: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },
         maxCharacters: { type: "number", minimum: 1, maximum: 100000 },
@@ -49,6 +50,19 @@ try {
   for (const url of ["http://8.8.8.8/", "https://[2606:4700:4700::1111]/"]) {
     expectStatus(run(callHelper, ["validate", "unused", "unused", "1", "fetch", "1", url]), 0, url);
   }
+  const search = ["validate", "unused", "unused", "1", "search", "1", "--objective"];
+  expectStatus(run(callHelper, search), 0, "option-like query stays positional");
+  for (const objective of ["primary sources", "x".repeat(4096), "\u{1f680}".repeat(4096)]) {
+    expectStatus(run(callHelper, [...search, "--objective", objective]), 0, "valid objective");
+  }
+  for (const options of [["--objective", ""], ["--objective", " \n\t"],
+    ["--objective", "x".repeat(4097)], ["--objective", "\u{1f680}".repeat(4097)],
+    ["--objective"], ["--unknown", "value"], ["--objective", "value", "--objective", "other"]]) {
+    const rejectedObjective = run(callHelper, [...search, ...options]);
+    expectStatus(rejectedObjective, 1, "invalid objective arguments");
+    assert.equal(JSON.parse(rejectedObjective.stderr.split("\n")[0]).error.code, "INVALID_ARGUMENT");
+    assert.equal(rejectedObjective.stdout, "");
+  }
 
   const authenticated = path.join(temporary, "authenticated.json");
   fs.writeFileSync(authenticated, JSON.stringify({ imports: [], mcpServers: { exa: {
@@ -58,7 +72,7 @@ try {
   } } }), { mode: 0o600 });
   const rejected = run(callHelper, ["call", mcporter, authenticated, "100", "search", "1", "test"]);
   expectStatus(rejected, 1, "authenticated config");
-  assert.match(rejected.stderr, /official anonymous endpoint/);
+  assert.match(rejected.stderr, /CONFIG_ERROR/);
   assert.doesNotMatch(rejected.stderr, /ECONNREFUSED|connect/);
 
   const fixture = path.join(temporary, "schema.json");
@@ -67,13 +81,17 @@ try {
   for (const additionalProperties of [true, {}]) {
     fs.writeFileSync(fixture, JSON.stringify(schema({ apply(value) {
       value.tools[0].inputSchema.additionalProperties = additionalProperties;
-      value.tools[0].inputSchema.minProperties = 2;
-      value.tools[0].inputSchema.maxProperties = 2;
+      value.tools[0].inputSchema.minProperties = 3;
+      value.tools[0].inputSchema.maxProperties = 3;
     } })));
     expectStatus(run(schemaChecker, [fixture]), 0, "compatible object constraints");
   }
   for (const apply of [
     (value) => value.tools[0].inputSchema.required.push("extra"),
+    (value) => { value.tools[0].inputSchema.required = ["query"]; },
+    (value) => { value.tools[0].inputSchema.properties.objective.type = "number"; },
+    (value) => { value.tools[0].inputSchema.properties.objective.maxLength = 4095; },
+    (value) => { value.tools[0].inputSchema.properties.objective.pattern = "^fixed$"; },
     (value) => { value.tools[0].inputSchema.allOf = [{ required: ["query"] }]; },
     (value) => { value.tools[0].inputSchema.$recursiveRef = "https://example.invalid/false-schema"; },
     (value) => { value.tools[0].inputSchema.dependentRequired = { query: ["extra"] }; },
@@ -84,7 +102,7 @@ try {
     (value) => { value.tools[0].inputSchema.additionalProperties = "false"; },
     (value) => { value.tools[0].inputSchema.minProperties = -1; },
     (value) => { value.tools[0].inputSchema.minProperties = 0.5; },
-    (value) => { value.tools[0].inputSchema.minProperties = 3; },
+    (value) => { value.tools[0].inputSchema.minProperties = 4; },
     (value) => { value.tools[0].inputSchema.maxProperties = -1; },
     (value) => { value.tools[0].inputSchema.maxProperties = 2.5; },
     (value) => { value.tools[0].inputSchema.maxProperties = 1; },

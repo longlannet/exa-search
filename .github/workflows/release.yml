@@ -335,8 +335,32 @@ jobs:
             exit 1
           fi
 
+          archive_name="$(basename -- "$SOURCE_ARCHIVE")"
+          checksums_name="$(basename -- "$SOURCE_CHECKSUMS")"
+          archive_digest="sha256:$(sha256sum "$SOURCE_ARCHIVE" | awk '{ print $1 }')"
+          checksums_digest="sha256:$(sha256sum "$SOURCE_CHECKSUMS" | awk '{ print $1 }')"
+          validate_existing_release() {
+            jq -e --arg id "$release_id" --arg state "$state" \
+              --arg archive "$archive_name" --arg archive_digest "$archive_digest" \
+              --arg checksums "$checksums_name" --arg checksums_digest "$checksums_digest" \
+              --arg tag "$RELEASE_TAG" --rawfile body "$SOURCE_NOTES" '
+                [
+                  { name: $archive, label: "Deterministic source archive", digest: $archive_digest },
+                  { name: $checksums, label: "SHA-256 checksums", digest: $checksums_digest }
+                ] as $expected |
+                .id == ($id | tonumber) and
+                .tag_name == $tag and .name == $tag and .body == $body and .prerelease == false and
+                .author.login == "github-actions[bot]" and .author.id == 41898282 and
+                (if $state == "draft" then .draft == true and .immutable == false
+                 else .draft == false and .immutable == true end) and
+                (.assets | type) == "array" and
+                ([.assets[].name] | unique | length) == (.assets | length) and
+                all(.assets[]; { name, label, digest } as $asset | any($expected[]; . == $asset))
+              ' <<<"$release_json" >/dev/null
+          }
           refresh_release() {
             release_json="$(gh api "$release_api")"
+            validate_existing_release
           }
           ensure_asset() {
             local asset_path="$1"
@@ -362,6 +386,7 @@ jobs:
             test "$actual_label" = "$asset_label"
           }
 
+          validate_existing_release
           ensure_asset "$SOURCE_ARCHIVE" "Deterministic source archive"
           ensure_asset "$SOURCE_CHECKSUMS" "SHA-256 checksums"
           archive_name="$(basename -- "$SOURCE_ARCHIVE")"

@@ -36,7 +36,10 @@ resolve_binary() {
 }
 cleanup_stage() {
   if [ -n "${STAGED_CONFIG:-}" ]; then
-    "$NODE_BIN" "$CONFIG_HELPER" cleanup "$CONFIG_FILE" "$STAGED_CONFIG" >/dev/null 2>&1 || true
+    if ! "$NODE_BIN" "$CONFIG_HELPER" cleanup "$CONFIG_FILE" "$STAGED_CONFIG" >/dev/null; then
+      printf '[exa-search] ERROR: config transaction cleanup failed; retained artifacts require inspection: %s\n' "$STAGED_CONFIG" >&2
+      return 1
+    fi
     STAGED_CONFIG=""
   fi
 }
@@ -85,6 +88,8 @@ MAX_OUTPUT_BYTES=$((10#$MAX_OUTPUT_BYTES))
 NODE_BIN="$(resolve_binary NODE_BIN node)"
 MCPORTER_BIN="$(resolve_binary MCPORTER_BIN mcporter)"
 TIMEOUT_BIN="$(resolve_binary TIMEOUT_BIN timeout)"
+FLOCK_BIN="$(resolve_binary FLOCK_BIN flock)"
+export FLOCK_BIN
 [ -f "$CONFIG_HELPER" ] || fail "config helper not found: $CONFIG_HELPER"
 [ -x "$CAPPED_RUNNER" ] || fail "capped runner not found: $CAPPED_RUNNER"
 CONFIG_FILE="$("$NODE_BIN" "$CONFIG_HELPER" resolve "$CONFIG_FILE")" || fail "failed to resolve config path"
@@ -117,7 +122,7 @@ for attempt in 1 2 3 4 5; do
   else
     commit_status=$?
   fi
-  cleanup_stage
+  cleanup_stage || fail "failed to clean up Exa config transaction safely"
   if [ "$commit_status" -ne 75 ] || [ "$attempt" -eq 5 ]; then
     fail "failed to commit Exa config safely"
   fi

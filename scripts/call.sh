@@ -11,23 +11,28 @@ SHOW_ERROR_OUTPUT="${SHOW_ERROR_OUTPUT:-0}"
 CONFIG_HELPER="$BASE_DIR/scripts/configure.mjs"
 CAPPED_RUNNER="$BASE_DIR/scripts/run-capped.sh"
 CALL_HELPER="$BASE_DIR/scripts/exa-call.mjs"
+RUNTIME_HELPER="$BASE_DIR/scripts/mcporter-support.mjs"
 
-fail() { printf '[exa-search] ERROR: %s\n' "$*" >&2; exit 1; }
+fail() { printf '[exa-search] ERROR [%s]: %s\n' "${2:-INVALID_ARGUMENT}" "$1" >&2; exit 1; }
 resolve_binary() {
   local variable="$1" fallback="$2" value="${!1:-}" resolved
-  if [ -n "$value" ]; then [ -x "$value" ] || fail "$variable is not executable";
+  if [ -n "$value" ]; then [ -x "$value" ] || fail "$variable is not executable" DEPENDENCY_ERROR;
   elif [ "$fallback" = "mcporter" ] && [ -x "$BASE_DIR/node_modules/.bin/mcporter" ]; then
     value="$BASE_DIR/node_modules/.bin/mcporter"
-  else value="$(command -v "$fallback" 2>/dev/null)" || fail "$fallback was not found"; fi
-  resolved="$(readlink -f -- "$value")" || fail "$variable could not be resolved"
+  else value="$(command -v "$fallback" 2>/dev/null)" || fail "$fallback was not found" DEPENDENCY_ERROR; fi
+  resolved="$(readlink -f -- "$value")" || fail "$variable could not be resolved" DEPENDENCY_ERROR
   printf '%s\n' "$resolved"
 }
 
-[ "$#" -ge 1 ] || fail "usage: call.sh search NUM_RESULTS QUERY | fetch MAX_CHARACTERS URL [URL...]"
+[ "$#" -ge 1 ] || fail "usage: call.sh search NUM_RESULTS QUERY [--objective OBJECTIVE] | fetch MAX_CHARACTERS URL [URL...]"
 MODE="$1"
 shift
 case "$MODE" in
-  search) [ "$#" -eq 2 ] || fail "search requires NUM_RESULTS and one shell-quoted QUERY" ;;
+  search)
+    if [ "$#" -ne 2 ] && { [ "$#" -ne 4 ] || [ "${3:-}" != "--objective" ]; }; then
+      fail "search requires NUM_RESULTS QUERY [--objective OBJECTIVE]; quote QUERY and OBJECTIVE separately"
+    fi
+    ;;
   fetch)
     if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
       fail "fetch requires MAX_CHARACTERS and 1-3 shell-quoted URLs"
@@ -38,8 +43,9 @@ esac
 NODE_BIN="$(resolve_binary NODE_BIN node)"
 MCPORTER_BIN="$(resolve_binary MCPORTER_BIN mcporter)"
 TIMEOUT_BIN="$(resolve_binary TIMEOUT_BIN timeout)"
-CONFIG_FILE="$("$NODE_BIN" "$CONFIG_HELPER" resolve "$CONFIG_FILE")" || fail "failed to resolve config path"
-"$NODE_BIN" "$CONFIG_HELPER" verify-policy "$CONFIG_FILE" "$MCPORTER_BIN" || fail "unsafe or unsupported Exa config"
+"$NODE_BIN" "$RUNTIME_HELPER" "$MCPORTER_BIN" || exit 1
+CONFIG_FILE="$("$NODE_BIN" "$CONFIG_HELPER" resolve "$CONFIG_FILE")" || fail "failed to resolve config path" CONFIG_ERROR
+"$NODE_BIN" "$CONFIG_HELPER" verify-policy "$CONFIG_FILE" "$MCPORTER_BIN" || fail "unsafe or unsupported Exa config" CONFIG_ERROR
 "$NODE_BIN" "$CALL_HELPER" validate "$MCPORTER_BIN" "$CONFIG_FILE" "$CALL_TIMEOUT_MS" "$MODE" "$@" || \
   fail "invalid Exa $MODE arguments"
 

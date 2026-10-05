@@ -6,9 +6,9 @@ SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 BASE_DIR="$(cd "$(dirname -- "$SCRIPT_PATH")/.." && pwd -P)"
 CAPTURE_CHECKER="$BASE_DIR/scripts/run-capped.mjs"
 SAFE_TAIL="$BASE_DIR/scripts/safe-tail.mjs"
+ERROR_RENDERER="$BASE_DIR/scripts/render-error.mjs"
 
-log_error() { printf '[exa-search] ERROR: %s\n' "$*" >&2; }
-fail() { log_error "$*"; exit 1; }
+fail() { printf '[exa-search] ERROR [%s]: %s\n' "${2:-PROCESS_ERROR}" "$1" >&2; exit 1; }
 require_toggle() { case "$2" in 0|1) ;; *) fail "$1 must be 0 or 1" ;; esac; }
 require_positive_integer() {
   case "$2" in ''|*[!0-9]*|0) fail "$1 must be a positive integer" ;; esac
@@ -62,6 +62,7 @@ BASH_BIN="$(readlink -f -- "$BASH")" || fail "bash could not be resolved"
 [ -x "$BASH_BIN" ] || fail "resolved bash is not executable"
 [ -f "$CAPTURE_CHECKER" ] || fail "capture checker not found"
 [ -f "$SAFE_TAIL" ] || fail "safe tail helper not found"
+[ -f "$ERROR_RENDERER" ] || fail "error renderer not found"
 TIMEOUT_VERSION="$({ "$TIMEOUT_BIN" --version 2>/dev/null || true; })"
 case "$TIMEOUT_VERSION" in 'timeout (GNU coreutils)'*) ;; *) fail "GNU coreutils timeout is required" ;; esac
 
@@ -108,16 +109,19 @@ NODE
 fi
 
 show_failure_detail
-[ "$CAPPED" -eq 0 ] || fail "$LABEL exceeded MAX_OUTPUT_BYTES or was truncated"
+[ "$CAPPED" -eq 0 ] || fail "$LABEL exceeded MAX_OUTPUT_BYTES or was truncated" OUTPUT_LIMIT
 case "$STATUS" in
   124)
-    if [ -s "$TIMEOUT_STDERR" ]; then fail "$LABEL timed out after $TIMEOUT_MS ms"; fi
+    if [ -s "$TIMEOUT_STDERR" ]; then fail "$LABEL timed out after $TIMEOUT_MS ms" TIMEOUT; fi
     fail "$LABEL failed with status 124"
     ;;
   137)
-    if [ -s "$TIMEOUT_STDERR" ]; then fail "$LABEL was killed with SIGKILL (deadline escalation)"; fi
+    if [ -s "$TIMEOUT_STDERR" ]; then fail "$LABEL was killed with SIGKILL (deadline escalation)" TIMEOUT; fi
     fail "$LABEL was killed with SIGKILL (child termination)"
     ;;
-  129|130|143) fail "$LABEL was interrupted" ;;
-  *) fail "$LABEL failed with status $STATUS" ;;
+  129|130|143) fail "$LABEL was interrupted" INTERRUPTED ;;
+  *)
+    if [ "$STATUS" -eq 1 ] && "$NODE_BIN" "$ERROR_RENDERER" "$CAPTURE_STDERR"; then exit 1; fi
+    fail "$LABEL failed with status $STATUS"
+    ;;
 esac

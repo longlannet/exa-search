@@ -1,4 +1,5 @@
 config/mcporter.json
 config/.*.exa-search.*
+config/.*.exa-search-recovery.*
 node_modules/
 /tmp/

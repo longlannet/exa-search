@@ -78,7 +78,7 @@ Run the `Publish signed release` workflow from the default branch and enter the 
 - refuses every write unless the protected environment, both exact no-bypass rulesets, and immutable releases are active;
 - installs GitHub CLI 2.97.0 from its fixed official archive only after verifying SHA-256 `a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112`;
 - creates a deterministic source archive and `SHA256SUMS`;
-- creates or resumes only a `github-actions[bot]` draft with `--verify-tag`, uploads only missing byte-identical assets, then rechecks the tag and the exact two-asset name/label/digest allowlist immediately before publishing that exact release ID;
+- creates or resumes only a `github-actions[bot]` draft with `--verify-tag`; before any upload it validates the release ID, author, metadata, and every existing asset name, label, and digest, then uploads missing assets and rechecks the exact two-asset allowlist before publishing that release ID;
 - uses a fail-closed GraphQL lookup to distinguish a genuinely absent release from API errors, then binds all REST reads to the returned draft release ID; it rechecks the immutable-release setting immediately before publishing the draft;
 - safely reuses an already immutable, byte-identical release after an interrupted verification instead of trying to recreate it;
 - verifies Latest state, the immutable release attestation, both uploaded assets, and the now-locked remote tag object.

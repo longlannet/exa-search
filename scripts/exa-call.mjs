@@ -4,10 +4,14 @@ import net from "node:net";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadJsoncParser, loadMcporterModule } from "./mcporter-support.mjs";
+import { loadJsoncParser, loadMcporterModule, loadMcporterSdk, REQUIRED_MCPORTER_VERSION } from "./mcporter-support.mjs";
+import { createBoundedExaFetch } from "./bounded-fetch.mjs";
+import { classifyError, writeError } from "./errors.mjs";
 
 process.umask(0o077);
 const MAX_QUERY_BYTES = 8192;
+const SEARCH_OBJECTIVE = "Find public sources that directly address the query and provide relevant evidence.";
+const MAX_OBJECTIVE_CHARACTERS = 4096;
 const MAX_URL_BYTES = 4096;
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const OFFICIAL_EXA_URL = "https://mcp.exa.ai/mcp";
@@ -135,10 +139,6 @@ function assertSuccessfulEnvelope(raw) {
     fail("Exa MCP returned empty content");
   }
 }
-function safeErrorMessage(error) {
-  return String(error?.message ?? error).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, (value) =>
-    `\\x${value.charCodeAt(0).toString(16).padStart(2, "0")}`);
-}
 export function safeJson(value) {
   return JSON.stringify(value, null, 2).replace(/[\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, (character) =>
     `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
@@ -146,12 +146,20 @@ export function safeJson(value) {
 function buildRequest(timeoutInput, mode, inputs) {
   const timeoutMs = parseInteger(timeoutInput, "timeout", 1, 999999999);
   if (mode === "search") {
-    if (inputs.length !== 2) fail("search requires NUM_RESULTS and QUERY");
+    if (inputs.length !== 2 && (inputs.length !== 4 || inputs[2] !== "--objective")) {
+      fail("search requires NUM_RESULTS QUERY [--objective OBJECTIVE]");
+    }
     const numResults = parseInteger(inputs[0], "numResults", 1, 10);
     const query = inputs[1];
     if (!query.trim()) fail("search query must not be empty");
     if (Buffer.byteLength(query, "utf8") > MAX_QUERY_BYTES) fail("search query is too long");
-    return { timeoutMs, toolName: "web_search_exa", args: { query, numResults } };
+    const objective = inputs.length === 4 ? inputs[3] : SEARCH_OBJECTIVE;
+    if (!objective.trim()) fail("search objective must not be empty");
+    if (Buffer.byteLength(objective, "utf8") > MAX_OBJECTIVE_CHARACTERS * 4 ||
+        [...objective].length > MAX_OBJECTIVE_CHARACTERS) {
+      fail("search objective must not exceed 4096 Unicode characters");
+    }
+    return { timeoutMs, toolName: "web_search_exa", args: { query, numResults, objective } };
   }
   if (mode === "fetch") {
     if (inputs.length < 2 || inputs.length > 4) fail("fetch requires MAX_CHARACTERS and 1-3 URLs");
@@ -171,70 +179,79 @@ export async function createAnonymousExaConnection(mcporterBinary, configInput) 
   if (typeof NOFOLLOW !== "number" || typeof NONBLOCK !== "number" || typeof process.geteuid !== "function") {
     fail("required Linux no-follow and ownership APIs are unavailable");
   }
-  const definition = readAnonymousDefinition(configInput, mcporterBinary);
-  const mcporter = await loadMcporterModule(mcporterBinary);
-  const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
-  const configPath = path.resolve(configInput);
-  const runtime = await mcporter.createRuntime({
-    servers: [definition],
-    // mcporter prefers servers and never rereads configPath; retaining the path keeps API-compatible test runtimes working.
-    configPath,
-    rootDir: path.dirname(configPath),
-    logger: silentLogger,
-  });
-  if (typeof runtime.connect !== "function") fail("mcporter runtime does not support anonymous connections");
-  let connection;
+  let definition;
+  try { definition = readAnonymousDefinition(configInput, mcporterBinary); }
+  catch (error) { throw classifyError(error, "CONFIG_ERROR"); }
+  let mcporter;
+  let sdk;
   try {
-    connection = await runtime.connect("exa", {
-      maxOAuthAttempts: 0,
-      skipCache: true,
-      allowCachedAuth: false,
-    });
-    if (!connection?.client || typeof connection.client.callTool !== "function") {
-      fail("mcporter returned an invalid anonymous connection");
-    }
-    if (connection.definition?.auth || connection.oauthSession) fail("authenticated Exa connections are disabled");
-    const headers = connection.definition?.command?.headers ?? {};
-    if (Object.keys(headers).some((name) => name.toLowerCase() === "authorization")) {
-      fail("authenticated Exa connections are disabled");
-    }
-    return { mcporter, runtime, connection };
+    mcporter = await loadMcporterModule(mcporterBinary);
+    sdk = await loadMcporterSdk(mcporterBinary);
+  } catch (error) { throw classifyError(error, "DEPENDENCY_ERROR"); }
+  const { Client, StreamableHTTPClientTransport, ListToolsResultSchema } = sdk;
+  const client = new Client({ name: "mcporter", version: REQUIRED_MCPORTER_VERSION }, {
+    jsonSchemaValidator: {
+      getValidator() { fail("remote output schema compilation is disabled"); },
+    },
+  });
+  let transport;
+  const budget = createBoundedExaFetch(() => { void closeQuietly(transport); });
+  transport = new StreamableHTTPClientTransport(definition.command.url, {
+    requestInit: { headers: definition.command.headers },
+    fetch: budget.fetch,
+  });
+  const connection = {
+    client,
+    transport,
+    definition,
+    get failure() { return budget.failure; },
+    assertHealthy() { budget.assertHealthy(); },
+    async listTools(params) {
+      // The SDK's listTools compiles outputSchema, which this skill never uses.
+      return client.request({ method: "tools/list", params }, ListToolsResultSchema);
+    },
+    async close() {
+      budget.close();
+      await closeQuietly(client);
+      await closeQuietly(transport);
+    },
+  };
+  try {
+    await client.connect(transport);
+    budget.assertHealthy();
+    return { mcporter, connection };
   } catch (error) {
-    await closeQuietly(connection?.client);
-    await closeQuietly(connection?.transport);
-    await closeQuietly(connection?.oauthSession);
-    await runtime.close().catch(() => {});
-    throw error;
+    await connection.close();
+    throw budget.failure ?? classifyError(error, "PROTOCOL_ERROR");
   }
 }
 
-let runtime;
 let connection;
 async function main() {
 let mcporter;
+let failureCode = "INVALID_ARGUMENT";
 try {
   const [action, mcporterBinary, configInput, timeoutInput, mode, ...inputs] = process.argv.slice(2);
   if (!mcporterBinary || !configInput || !mode) fail("action, mcporter, config, timeout, and call mode are required");
   if (action !== "validate" && action !== "call") fail("action must be validate or call");
   const { timeoutMs, toolName, args } = buildRequest(timeoutInput, mode, inputs);
   if (action === "validate") process.exit(0);
-  ({ mcporter, runtime, connection } = await createAnonymousExaConnection(mcporterBinary, configInput));
+  failureCode = "REMOTE_ERROR";
+  ({ mcporter, connection } = await createAnonymousExaConnection(mcporterBinary, configInput));
   const raw = await connection.client.callTool({ name: toolName, arguments: args }, undefined, {
     timeout: timeoutMs,
     resetTimeoutOnProgress: true,
     maxTotalTimeout: timeoutMs,
   });
+  connection.assertHealthy();
   assertSuccessfulEnvelope(raw);
   const formatted = mcporter.createCallResult(raw).json();
   process.stdout.write(`${safeJson(formatted ?? raw)}\n`);
 } catch (error) {
-  process.stderr.write(`[exa-search] ERROR: ${safeErrorMessage(error)}\n`);
+  writeError(connection?.failure ?? error, failureCode);
   process.exitCode = 1;
 } finally {
-  await closeQuietly(connection?.client);
-  await closeQuietly(connection?.transport);
-  await closeQuietly(connection?.oauthSession);
-  if (runtime) await runtime.close().catch(() => {});
+  await closeQuietly(connection);
 }
 }
 

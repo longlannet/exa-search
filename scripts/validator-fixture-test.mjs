@@ -57,6 +57,7 @@ try {
 
   mutate("SKILL.md", '"os": ["linux"],',
     '"os": ["linux"], "primaryEnv": "EXA_API_KEY",', "API-key metadata");
+  mutate("SKILL.md", ', "flock"', '', "kernel lock prerequisite");
   mutate("config/mcporter.json.example", '"baseUrl": "https://mcp.exa.ai/mcp",',
     '"baseUrl": "https://mcp.exa.ai/mcp", "headers": { "Authorization": "Bearer forbidden" },',
     "authenticated MCP config");
@@ -113,6 +114,12 @@ try {
     '.author.login == "attacker"', "release author identity", true);
   mutate(".github/workflows/release.yml", '"Deterministic source archive"',
     '"Untrusted source archive"', "release asset label", true);
+  mutate(".github/workflows/release.yml",
+    '          validate_existing_release\n          ensure_asset "$SOURCE_ARCHIVE"',
+    '          ensure_asset "$SOURCE_ARCHIVE"', "release preflight before upload");
+  mutate(".github/workflows/release.yml",
+    'all(.assets[]; { name, label, digest } as $asset | any($expected[]; . == $asset))',
+    'true', "existing draft asset validation");
 
   const workflowYml = path.join(fixture, ".github", "workflows", "release.yml");
   const workflowYaml = path.join(fixture, ".github", "workflows", "release.yaml");

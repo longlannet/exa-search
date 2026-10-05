@@ -15,9 +15,10 @@ CAPPED_RUNNER="$BASE_DIR/scripts/run-capped.sh"
 CALL_HELPER="$BASE_DIR/scripts/exa-call.mjs"
 SCHEMA_HELPER="$BASE_DIR/scripts/schema-list.mjs"
 SCHEMA_CHECKER="$BASE_DIR/scripts/schema-check.mjs"
+RUNTIME_HELPER="$BASE_DIR/scripts/mcporter-support.mjs"
 
 log() { printf '[exa-search] %s\n' "$*"; }
-fail() { printf '[exa-search] ERROR: %s\n' "$*" >&2; exit 1; }
+fail() { printf '[exa-search] ERROR [%s]: %s\n' "${2:-INVALID_ARGUMENT}" "$1" >&2; exit 1; }
 require_toggle() { case "$2" in 0|1) ;; *) fail "$1 must be 0 or 1" ;; esac; }
 require_positive_integer() {
   case "$2" in ''|*[!0-9]*|0) fail "$1 must be a positive integer" ;; esac
@@ -27,18 +28,18 @@ require_positive_integer() {
 resolve_binary() {
   local variable="$1" fallback="$2" value="${!1:-}" resolved
   if [ -n "$value" ]; then
-    [ -x "$value" ] || fail "$variable is not executable: $value"
+    [ -x "$value" ] || fail "$variable is not executable: $value" DEPENDENCY_ERROR
   elif [ "$fallback" = "mcporter" ] && [ -x "$BASE_DIR/node_modules/.bin/mcporter" ]; then
     value="$BASE_DIR/node_modules/.bin/mcporter"
   else
-    value="$(command -v "$fallback" 2>/dev/null)" || fail "$fallback was not found"
+    value="$(command -v "$fallback" 2>/dev/null)" || fail "$fallback was not found" DEPENDENCY_ERROR
   fi
-  resolved="$(readlink -f -- "$value")" || fail "$variable could not be resolved"
+  resolved="$(readlink -f -- "$value")" || fail "$variable could not be resolved" DEPENDENCY_ERROR
   printf '%s\n' "$resolved"
 }
 verify_policy() {
   "$NODE_BIN" "$CONFIG_HELPER" verify-policy "$CONFIG_FILE" "$MCPORTER_BIN" || \
-    fail "unsafe or unsupported Exa config"
+    fail "unsafe or unsupported Exa config" CONFIG_ERROR
 }
 run_capped() {
   local label="$1" timeout_ms="$2" status
@@ -73,11 +74,12 @@ MAX_OUTPUT_BYTES=$((10#$MAX_OUTPUT_BYTES))
 NODE_BIN="$(resolve_binary NODE_BIN node)"
 MCPORTER_BIN="$(resolve_binary MCPORTER_BIN mcporter)"
 TIMEOUT_BIN="$(resolve_binary TIMEOUT_BIN timeout)"
+"$NODE_BIN" "$RUNTIME_HELPER" "$MCPORTER_BIN" || exit 1
 for required_file in "$CONFIG_HELPER" "$CALL_HELPER" "$SCHEMA_HELPER" "$SCHEMA_CHECKER"; do
   [ -f "$required_file" ] || fail "required helper not found: $required_file"
 done
 [ -x "$CAPPED_RUNNER" ] || fail "capped runner not found: $CAPPED_RUNNER"
-CONFIG_FILE="$("$NODE_BIN" "$CONFIG_HELPER" resolve "$CONFIG_FILE")" || fail "failed to resolve config path"
+CONFIG_FILE="$("$NODE_BIN" "$CONFIG_HELPER" resolve "$CONFIG_FILE")" || fail "failed to resolve config path" CONFIG_ERROR
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/exa-search-check.XXXXXX")"
 SCHEMA_OUTPUT="$TMP_ROOT/schema.json"
 ACTIVE_PID=""
@@ -99,7 +101,8 @@ run_capped "schema discovery" "$DISCOVERY_TIMEOUT_MS" \
   "$NODE_BIN" --max-old-space-size=128 "$SCHEMA_HELPER" "$MCPORTER_BIN" "$CONFIG_FILE" \
   >"$SCHEMA_OUTPUT"
 verify_policy
-"$NODE_BIN" "$SCHEMA_CHECKER" "$SCHEMA_OUTPUT" || fail "schema response validation failed"
+run_capped "schema validation" "$DISCOVERY_TIMEOUT_MS" \
+  "$NODE_BIN" --max-old-space-size=128 "$SCHEMA_CHECKER" "$SCHEMA_OUTPUT"
 log "schema check: OK"
 
 if [ "$RUN_SMOKE" = "1" ]; then
