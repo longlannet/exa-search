@@ -52,7 +52,7 @@ jobs:
         run: |
           empty_tree="$(git hash-object -t tree /dev/null)"
           git diff --check "$empty_tree" HEAD
-          bash -n scripts/*.sh
+          for file in scripts/*.sh; do bash -n "$file"; done
           "$RUNNER_TEMP/shellcheck-v0.9.0/shellcheck" -x scripts/*.sh
           for file in scripts/*.mjs; do node --check "$file"; done
           node scripts/validate-skill.mjs SKILL.md
@@ -61,6 +61,7 @@ jobs:
         run: |
           node scripts/validator-fixture-test.mjs
           node scripts/release-lookup-fixture-test.mjs
+          node scripts/release-state-fixture-test.mjs
       - name: Clean archive adversarial selftest
         working-directory: /tmp
         run: |

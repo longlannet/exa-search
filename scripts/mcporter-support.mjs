@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { writeError } from "./errors.mjs";
 
 export const REQUIRED_MCPORTER_VERSION = "0.9.0";
 const SKILL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -162,9 +163,37 @@ export async function loadMcporterModule(binaryInput) {
   const entry = path.join(root, "dist", "index.js");
   const stat = fs.statSync(entry);
   if (!stat.isFile()) fail("mcporter runtime entry is not a regular file");
+  // mcporter reads this at import time and writes diagnostics directly to stdout.
+  process.env.MCPORTER_STDIO_TRACE = "0";
   const module = await import(pathToFileURL(entry).href);
   if (typeof module.createRuntime !== "function" || typeof module.createCallResult !== "function") {
     fail("mcporter runtime API is incomplete");
   }
   return module;
+}
+
+export async function loadMcporterSdk(binaryInput) {
+  const { manifestPath } = findMcporterPackage(binaryInput);
+  const dependency = findDependencyManifest(manifestPath, "@modelcontextprotocol/sdk");
+  if (!dependency) fail("the locked MCP SDK is missing");
+  const esmRoot = path.join(path.dirname(dependency.manifestPath), "dist", "esm");
+  const [{ Client }, { StreamableHTTPClientTransport }, { ListToolsResultSchema }] = await Promise.all([
+    import(pathToFileURL(path.join(esmRoot, "client", "index.js")).href),
+    import(pathToFileURL(path.join(esmRoot, "client", "streamableHttp.js")).href),
+    import(pathToFileURL(path.join(esmRoot, "types.js")).href),
+  ]);
+  if (typeof Client !== "function" || typeof StreamableHTTPClientTransport !== "function" || !ListToolsResultSchema) {
+    fail("the locked MCP SDK API is incomplete");
+  }
+  return { Client, StreamableHTTPClientTransport, ListToolsResultSchema };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  try {
+    if (process.argv.length !== 3) fail("one mcporter binary path is required");
+    loadJsoncParser(process.argv[2]);
+  } catch (error) {
+    writeError(error, "DEPENDENCY_ERROR");
+    process.exitCode = 1;
+  }
 }

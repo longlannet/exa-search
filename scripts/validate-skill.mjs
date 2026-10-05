@@ -62,7 +62,7 @@ try {
   requireExact(value.metadata, { openclaw: {
     emoji: "🔎",
     os: ["linux"],
-    requires: { bins: ["bash", "node", "npm", "timeout", "readlink", "mktemp", "wc"] },
+    requires: { bins: ["bash", "node", "npm", "timeout", "readlink", "mktemp", "wc", "flock"] },
   } }, "OpenClaw metadata");
 
   const body = text.slice(closing + 5);
@@ -149,6 +149,7 @@ try {
   const testCommands = (testJob.steps ?? []).map((step) => step?.run).filter(Boolean).join("\n");
   requireText(testCommands, "node scripts/validator-fixture-test.mjs", "CI validator regressions");
   requireText(testCommands, "node scripts/release-lookup-fixture-test.mjs", "CI release lookup regressions");
+  requireText(testCommands, "node scripts/release-state-fixture-test.mjs", "CI release state regressions");
   for (const command of [
     "bash scripts/check.sh",
     "bash scripts/call.sh search 1",
@@ -279,12 +280,12 @@ try {
     if (releaseCommands.includes(forbidden)) fail(`release workflow contains forbidden command: ${forbidden}`);
   }
   for (const [fragment, count] of [
-    ['.body == $body', 3],
-    ['.prerelease == false', 3],
-    ['.author.login == "github-actions[bot]"', 3],
-    ['.author.id == 41898282', 3],
-    ['"Deterministic source archive"', 3],
-    ['"SHA-256 checksums"', 3],
+    ['.body == $body', 4],
+    ['.prerelease == false', 4],
+    ['.author.login == "github-actions[bot]"', 4],
+    ['.author.id == 41898282', 4],
+    ['"Deterministic source archive"', 4],
+    ['"SHA-256 checksums"', 4],
     ['.assets[] | { name, label, digest }', 2],
     ['gate/scripts/find-release-id.sh', 2],
     ['releases/$RELEASE_ID', 3],
@@ -301,11 +302,18 @@ try {
     ['.verification.verified == true and .verification.reason == "valid"', 2],
     ['.commit.verification.verified == true and .commit.verification.reason == "valid"', 2],
   ]) requireOccurrences(releaseCommands, fragment, count, "release workflow");
+  const releaseStateCommands = publishJob.steps.find((step) => step.id === "release_state")?.run ?? "";
+  requireOccurrences(releaseStateCommands, "validate_existing_release", 3, "release draft preflight");
+  requireText(releaseStateCommands,
+    'validate_existing_release\nensure_asset "$SOURCE_ARCHIVE"', "release preflight before any upload");
+  requireText(releaseStateCommands,
+    'all(.assets[]; { name, label, digest } as $asset | any($expected[]; . == $asset))',
+    "release existing asset validation");
 
   const callScript = fs.readFileSync(path.join(skillRoot, "scripts", "call.sh"), "utf8");
   const checkScript = fs.readFileSync(path.join(skillRoot, "scripts", "check.sh"), "utf8");
   requireOccurrences(callScript, "--max-old-space-size=128", 1, "call runtime heap limit");
-  requireOccurrences(checkScript, "--max-old-space-size=128", 3, "check runtime heap limits");
+  requireOccurrences(checkScript, "--max-old-space-size=128", 4, "check runtime heap limits");
   const installScript = fs.readFileSync(path.join(skillRoot, "scripts", "install.sh"), "utf8");
   requireOccurrences(installScript, "--max-old-space-size=128", 1, "installer runtime heap limit");
 

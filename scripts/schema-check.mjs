@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import { writeError } from "./errors.mjs";
 
 function fail(message) { throw new Error(message); }
 function isSchemaValue(value) {
@@ -107,9 +108,10 @@ try {
     .filter((tool) => tool && typeof tool === "object" && typeof tool.name === "string")
     .map((tool) => [tool.name, tool]));
   const search = schemaFor(tools, "web_search_exa");
-  requireCompatibleObject(search, "web_search_exa input", 2);
-  requireExactRequired(search, ["query"]);
+  requireCompatibleObject(search, "web_search_exa input", 3);
+  requireExactRequired(search, ["query", "objective"]);
   requireCompatibleString(search.properties.query, "query", 1, 8192);
+  requireCompatibleString(search.properties.objective, "objective", 1, 4096);
   requireCompatibleRange(search.properties.numResults, "numResults", 1, 10);
   const fetch = schemaFor(tools, "web_fetch_exa");
   requireCompatibleObject(fetch, "web_fetch_exa input", 2);
@@ -130,8 +132,6 @@ try {
   }
   requireCompatibleRange(fetch.properties.maxCharacters, "maxCharacters", 1, 100000);
 } catch (error) {
-  const message = String(error?.message ?? error).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, (value) =>
-    `\\x${value.charCodeAt(0).toString(16).padStart(2, "0")}`);
-  process.stderr.write(`[exa-search] ERROR: ${message}\n`);
+  writeError(error, "SCHEMA_MISMATCH");
   process.exit(1);
 }

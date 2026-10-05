@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
 import { loadJsoncParser } from "./mcporter-support.mjs";
@@ -114,7 +115,10 @@ function readPrivateFile(filePath, required, maxBytes) {
     if (stat.nlink !== 1) fail(`refusing hard-linked file: ${filePath}`);
     if (stat.uid !== process.geteuid()) fail(`file ownership changed: ${filePath}`);
     if (stat.size > maxBytes) fail(`file exceeds ${maxBytes} bytes: ${filePath}`);
-    return { content: fs.readFileSync(fd), identity: identityOf(stat), mode: stat.mode & 0o777 };
+    const identity = identityOf(stat);
+    const content = fs.readFileSync(fd);
+    if (!identityMatches(fs.fstatSync(fd), identity)) fail(`file changed while reading: ${filePath}`, "CONFIG_CHANGED");
+    return { content, identity, mode: stat.mode & 0o777 };
   } finally { fs.closeSync(fd); }
 }
 function createPrivateFile(filePath, content) {
@@ -124,6 +128,10 @@ function createPrivateFile(filePath, content) {
     fs.fchmodSync(fd, 0o600);
     fs.fsyncSync(fd);
     return identityOf(fs.fstatSync(fd));
+  } catch (error) {
+    try { safeUnlinkIfMatches(filePath, identityOf(fs.fstatSync(fd))); }
+    catch { /* Preserve an artifact whose ownership or identity cannot be established. */ }
+    throw error;
   } finally { fs.closeSync(fd); }
 }
 function rewritePrivateFile(filePath, content, expectedIdentity) {
@@ -306,7 +314,7 @@ function prepare(configPath, ownerInput) {
       fsyncDirectory(directory);
     } catch (error) { safeUnlink(stagedPath); safeUnlink(metadataPath); throw error; }
   } finally {
-    requireUnlinkMatch(lock.path, lock.identity);
+    releaseCommitLock(lock);
   }
   process.stdout.write(`${stagedPath}\n`);
 }
@@ -327,6 +335,17 @@ function validateMetadata(configPath, stagedPath, value) {
   if (recoveryPath) value.recoveryPath = recoveryPath;
   if ([configPath, stagedPath, `${stagedPath}.meta`].includes(value.recoveryPath)) {
     fail("transaction recovery path conflicts with transaction files");
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "recoveryMode")) {
+    if (value.recoveryMode !== "copy" || !recoveryPath ||
+        typeof value.originalSha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.originalSha256) ||
+        (value.recovery !== undefined && !isFileIdentity(value.recovery)) ||
+        (value.recoveryStarted !== undefined && (!isFileIdentity(value.recoveryStarted) || value.recoveryStarted.size !== "0")) ||
+        (value.aborted !== undefined && value.aborted !== true)) {
+      fail("transaction copy recovery metadata is invalid");
+    }
+  } else if (["recovery", "recoveryStarted", "originalSha256", "aborted"].some((key) => Object.prototype.hasOwnProperty.call(value, key))) {
+    fail("transaction copy recovery mode is missing");
   }
   return value;
 }
@@ -482,38 +501,73 @@ function fsyncDirectory(directory) {
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 function commitLockPath(configPath) { return path.join(path.dirname(configPath), `.${path.basename(configPath)}.exa-search.lock`); }
+function acquireDirectoryLock(configPath) {
+  const directory = path.dirname(configPath);
+  const fd = fs.openSync(directory, fs.constants.O_RDONLY | DIRECTORY | NOFOLLOW | NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isDirectory() || stat.uid !== process.geteuid() || (stat.mode & 0o022) !== 0) {
+      fail("config lock directory is unsafe");
+    }
+    // flock belongs to the shared open-file description and survives the child exit.
+    const result = spawnSync(process.env.FLOCK_BIN ?? "flock",
+      ["--exclusive", "--timeout", String(COMMIT_LOCK_WAIT_MS / 1000), "--conflict-exit-code", "75", "3"], {
+        stdio: ["ignore", "pipe", "pipe", fd], encoding: "utf8", maxBuffer: 4096,
+        timeout: COMMIT_LOCK_WAIT_MS + 1000, killSignal: "SIGKILL",
+      });
+    if (result.status === 75) fail("another Exa config transaction is in progress", "CONFIG_CHANGED");
+    if (result.error || result.status !== 0) fail("failed to acquire config directory lock; working util-linux flock is required");
+    const current = fs.lstatSync(directory);
+    if (!current.isDirectory() || current.isSymbolicLink() || !inodeMatches(current, identityOf(stat))) {
+      fail("config directory changed while acquiring its lock", "CONFIG_CHANGED");
+    }
+    return fd;
+  } catch (error) { fs.closeSync(fd); throw error; }
+}
+function releaseCommitLock(lock, required = true) {
+  try {
+    if (required) requireUnlinkMatch(lock.path, lock.identity);
+    else safeUnlinkIfMatches(lock.path, lock.identity);
+  } finally { fs.closeSync(lock.directoryFd); }
+}
 function recoverStaleLock(lockPath) {
-  const record = readPrivateFile(lockPath, true, MAX_METADATA_BYTES);
+  const record = readPrivateFile(lockPath, false, MAX_METADATA_BYTES);
+  if (!record) return true;
   let metadata;
   const text = record.content.toString("utf8");
   try { metadata = JSON.parse(text); }
-  catch {
-    const legacyPid = text.trim();
-    if (!/^\d+$/.test(legacyPid) || !Number.isSafeInteger(Number(legacyPid))) {
-      fail(`invalid Exa commit lock requires manual inspection: ${lockPath}`);
-    }
-    metadata = { pid: Number(legacyPid), startToken: null };
+  catch { /* A creator may not have finished its first write yet. */ }
+  if (/^\d+$/.test(text.trim())) metadata = { pid: Number(text.trim()), startToken: null };
+  if (!isPlainObject(metadata) || !Number.isSafeInteger(metadata.pid) || metadata.pid <= 0 ||
+      (metadata.startToken !== null && typeof metadata.startToken !== "string")) {
+    fail(`invalid Exa commit lock requires manual inspection: ${lockPath}`, "LOCK_INITIALIZING");
   }
   if (processMatches(metadata?.pid, metadata?.startToken)) return false;
   return safeUnlinkIfMatches(lockPath, record.identity);
 }
 function acquireCommitLock(configPath) {
+  const directoryFd = acquireDirectoryLock(configPath);
   const lockPath = commitLockPath(configPath);
   const deadline = Date.now() + COMMIT_LOCK_WAIT_MS;
-  while (true) {
-    try {
-      const identity = createPrivateFile(lockPath, Buffer.from(JSON.stringify({
-        pid: process.pid,
-        startToken: processStartToken(process.pid),
-      }), "utf8"));
-      return { path: lockPath, identity };
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (recoverStaleLock(lockPath)) continue;
-      if (Date.now() >= deadline) fail("another Exa config commit is in progress", "CONFIG_CHANGED");
-      Atomics.wait(pauseBuffer, 0, 0, COMMIT_LOCK_POLL_MS);
+  try {
+    while (true) {
+      try {
+        const identity = createPrivateFile(lockPath, Buffer.from(JSON.stringify({
+          pid: process.pid,
+          startToken: processStartToken(process.pid),
+        }), "utf8"));
+        return { path: lockPath, identity, directoryFd };
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        try { if (recoverStaleLock(lockPath)) continue; }
+        catch (lockError) {
+          if (!["LOCK_INITIALIZING", "CONFIG_CHANGED"].includes(lockError.code) || Date.now() >= deadline) throw lockError;
+        }
+        if (Date.now() >= deadline) fail("another Exa config commit is in progress", "CONFIG_CHANGED");
+        Atomics.wait(pauseBuffer, 0, 0, COMMIT_LOCK_POLL_MS);
+      }
     }
-  }
+  } catch (error) { fs.closeSync(directoryFd); throw error; }
 }
 function backupPathFor(configPath) {
   return path.join(path.dirname(configPath),
@@ -558,7 +612,74 @@ function requireUnlinkMatch(filePath, identity, renamed = false) {
     safeUnlinkIfMatches(filePath, identity);
   if (!removed) fail(`transaction artifact changed before cleanup: ${filePath}`);
 }
+function contentDigest(content) { return crypto.createHash("sha256").update(content).digest("hex"); }
+function createRecoveryCopy(configPath, stagedPath, metadata, content) {
+  const fd = fs.openSync(metadata.recoveryPath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, 0o600);
+  try {
+    metadata.recoveryStarted = identityOf(fs.fstatSync(fd));
+    // Persist ownership of the empty inode before writes can leave an incomplete backup.
+    writeMetadataAtomic(configPath, stagedPath, metadata);
+    fs.writeFileSync(fd, content);
+    fs.fchmodSync(fd, 0o600);
+    fs.fsyncSync(fd);
+    return identityOf(fs.fstatSync(fd));
+  } finally { fs.closeSync(fd); }
+}
+function readRecoveryCopy(metadata, allowIncomplete = false) {
+  const recovery = readPrivateFile(metadata.recoveryPath, false, MAX_CONFIG_BYTES);
+  if (recovery) {
+    const complete = metadata.recovery && identityMatches(recovery.identity, metadata.recovery) &&
+      contentDigest(recovery.content) === metadata.originalSha256;
+    const incomplete = allowIncomplete && !metadata.recovery && (metadata.recoveryStarted ?
+      inodeMatches(recovery.identity, metadata.recoveryStarted) : recovery.content.length === 0);
+    if ((recovery.mode & 0o077) !== 0 || (!complete && !incomplete)) {
+      fail(`config recovery copy changed; retained for manual inspection: ${metadata.recoveryPath}`);
+    }
+  }
+  return recovery;
+}
+function recoverCopyTransaction(configPath, stagedPath, metadata, metadataIdentity) {
+  const directory = path.dirname(configPath);
+  const stagedStat = inspectTransactionPath(stagedPath);
+  const stageIsStaged = Boolean(stagedStat) && identityMatches(stagedStat, metadata.staged);
+  const recovery = readRecoveryCopy(metadata, stageIsStaged || metadata.aborted);
+  if (stageIsStaged || metadata.aborted) {
+    if (stagedStat && !stageIsStaged) fail(`staged config changed; retained for manual inspection: ${stagedPath}`);
+    // The original stage still exists, so its atomic publication never happened.
+    // Persist that fact before cleanup so another interruption cannot make an editor's change ambiguous.
+    if (!metadata.aborted) {
+      metadata.aborted = true;
+      writeMetadataAtomic(configPath, stagedPath, metadata);
+      metadataIdentity = readMetadataRecord(configPath, stagedPath).identity;
+    }
+    if (recovery) requireUnlinkMatch(metadata.recoveryPath, recovery.identity);
+    fsyncDirectory(directory);
+    if (stageIsStaged) requireUnlinkMatch(stagedPath, metadata.staged);
+    fsyncDirectory(directory);
+    requireUnlinkMatch(`${stagedPath}.meta`, metadataIdentity);
+    return;
+  }
+  const configStat = inspectTransactionPath(configPath);
+  const configIsPublished = Boolean(configStat) && renamedIdentityMatches(configStat, metadata.staged);
+  const configIsRestored = Boolean(configStat) && metadata.recovery &&
+    renamedIdentityMatches(configStat, metadata.recovery) && !recovery;
+  if (!stagedStat && (configIsPublished || configIsRestored)) {
+    if (configIsRestored && contentDigest(readPrivateFile(configPath, true, MAX_CONFIG_BYTES).content) !== metadata.originalSha256) {
+      fail("restored config changed; transaction retained for manual inspection");
+    }
+    if (recovery) requireUnlinkMatch(metadata.recoveryPath, recovery.identity);
+    fsyncDirectory(directory);
+    requireUnlinkMatch(`${stagedPath}.meta`, metadataIdentity);
+    return;
+  }
+  fail(`ambiguous Exa config transaction requires manual inspection: ${stagedPath}`);
+}
 function recoverTransaction(configPath, stagedPath, metadata, metadataIdentity) {
+  if (metadata.recoveryMode === "copy") {
+    recoverCopyTransaction(configPath, stagedPath, metadata, metadataIdentity);
+    return;
+  }
   if (!metadata.recoveryPath) {
     const configStat = inspectTransactionPath(configPath);
     const stagedStat = inspectTransactionPath(stagedPath);
@@ -618,19 +739,11 @@ function recoverTransaction(configPath, stagedPath, metadata, metadataIdentity) 
   }
   fail(`ambiguous Exa config transaction requires manual inspection: ${stagedPath}`);
 }
-function restoreMovedOriginal(configPath, stagedPath, metadata, published) {
-  if (published) {
-    if (!pathMatchesIdentity(configPath, metadata.staged, true)) {
-      fail("published config path changed before rollback; recovery retained for manual inspection");
-    }
-  } else {
-    const current = inspectTransactionPath(configPath);
-    if (current) fail("config path was recreated before rollback; recovery retained for manual inspection");
+function restoreCopiedOriginal(configPath, metadata) {
+  if (!pathMatchesIdentity(configPath, metadata.staged, true)) {
+    fail("published config path changed before rollback; recovery retained for manual inspection");
   }
-  const recoveryStat = inspectTransactionPath(metadata.recoveryPath);
-  if (!recoveryStat || !renamedIdentityMatches(recoveryStat, metadata.original)) {
-    fail("config recovery file changed before rollback");
-  }
+  if (!readRecoveryCopy(metadata)) fail("config recovery copy is missing before rollback");
   fs.renameSync(metadata.recoveryPath, configPath);
   fsyncDirectory(path.dirname(configPath));
 }
@@ -640,29 +753,31 @@ function commit(configPath, stagedInput, mcporterBinary) {
   let lock;
   let stage;
   let metadata;
-  let originalMoved = false;
   let published = false;
   let verified = false;
   try {
     lock = acquireCommitLock(configPath);
     metadata = readMetadata(configPath, stagedPath);
-    readOriginalForCommit(configPath, metadata.original);
+    if (metadata.recoveryPath) fail("transaction already has a recovery plan; cleanup is required before retrying");
+    const original = readOriginalForCommit(configPath, metadata.original);
     stage = openStageForCommit(stagedPath, metadata.staged, mcporterBinary);
     if (!targetMatches(configPath, metadata.original)) fail("config changed concurrently", "CONFIG_CHANGED");
     if (!pathMatchesIdentity(stagedPath, stage.identity)) fail("staged config changed before commit", "CONFIG_CHANGED");
     if (metadata.original) {
       metadata.recoveryPath = backupPathFor(configPath);
+      metadata.recoveryMode = "copy";
+      metadata.originalSha256 = contentDigest(original.content);
       assertPathMissing(metadata.recoveryPath);
       writeMetadataAtomic(configPath, stagedPath, metadata);
-      if (!targetMatches(configPath, metadata.original)) fail("config changed concurrently", "CONFIG_CHANGED");
-      if (!pathMatchesIdentity(stagedPath, stage.identity)) fail("staged config changed before commit", "CONFIG_CHANGED");
-      assertPathMissing(metadata.recoveryPath);
-      fs.renameSync(configPath, metadata.recoveryPath);
-      originalMoved = true;
+      const beforeCopy = readOriginalForCommit(configPath, metadata.original);
+      if (!beforeCopy.content.equals(original.content)) fail("config changed concurrently", "CONFIG_CHANGED");
+      metadata.recovery = createRecoveryCopy(configPath, stagedPath, metadata, original.content);
       fsyncDirectory(path.dirname(configPath));
-      if (!pathMatchesIdentity(metadata.recoveryPath, metadata.original, true)) {
-        fail("config recovery identity is invalid");
-      }
+      writeMetadataAtomic(configPath, stagedPath, metadata);
+      const beforePublish = readOriginalForCommit(configPath, metadata.original);
+      if (!beforePublish.content.equals(original.content)) fail("config changed concurrently", "CONFIG_CHANGED");
+      if (!pathMatchesIdentity(stagedPath, stage.identity)) fail("staged config changed before commit", "CONFIG_CHANGED");
+      readRecoveryCopy(metadata);
     }
     fs.renameSync(stagedPath, configPath);
     published = true;
@@ -671,8 +786,10 @@ function commit(configPath, stagedInput, mcporterBinary) {
     verifyPolicy(configPath, mcporterBinary);
     verified = true;
   } catch (error) {
-    if (originalMoved) {
-      try { restoreMovedOriginal(configPath, stagedPath, metadata, published); }
+    if (!published && stage && !inspectTransactionPath(stagedPath) &&
+        pathMatchesIdentity(configPath, stage.identity, true)) published = true;
+    if (published && metadata.recoveryMode === "copy") {
+      try { restoreCopiedOriginal(configPath, metadata); }
       catch (rollbackError) {
         rollbackError.cause = error;
         throw rollbackError;
@@ -691,24 +808,26 @@ function commit(configPath, stagedInput, mcporterBinary) {
   } finally {
     if (stage) fs.closeSync(stage.fd);
     if (!verified && lock) {
-      try { safeUnlinkIfMatches(lock.path, lock.identity); }
+      try { releaseCommitLock(lock, false); }
       catch { /* A stale lock is recoverable by PID identity on the next transaction. */ }
     }
   }
   if (metadata.recoveryPath) {
     let recoveryRemovalDurable = false;
     try {
-      requireUnlinkMatch(metadata.recoveryPath, metadata.original, true);
+      const recovery = readRecoveryCopy(metadata);
+      if (!recovery) fail("config recovery copy disappeared before cleanup");
+      requireUnlinkMatch(metadata.recoveryPath, recovery.identity);
       fsyncDirectory(path.dirname(configPath));
       recoveryRemovalDurable = true;
     } catch { /* Retain metadata so the next prepare can finish or inspect recovery cleanup. */ }
     if (!recoveryRemovalDurable) {
-      try { requireUnlinkMatch(lock.path, lock.identity); } catch { /* Stale lock recovery is safe after commit. */ }
+      try { releaseCommitLock(lock); } catch { /* Stale lock recovery is safe after commit. */ }
       return;
     }
   }
   try {
-    requireUnlinkMatch(lock.path, lock.identity);
+    releaseCommitLock(lock);
     const metadataRecord = readMetadataRecord(configPath, stagedPath);
     requireUnlinkMatch(`${stagedPath}.meta`, metadataRecord.identity);
   } catch { /* A verified commit must not be reported as failed during artifact cleanup. */ }
@@ -726,7 +845,7 @@ function cleanup(configPath, stagedInput) {
     }
     recoverTransaction(configPath, stagedPath, record.value, record.identity);
   } finally {
-    requireUnlinkMatch(lock.path, lock.identity);
+    releaseCommitLock(lock);
   }
 }
 function safeErrorMessage(error) {
